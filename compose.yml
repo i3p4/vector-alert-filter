@@ -1,0 +1,16 @@
+
+services:
+
+  vaf:
+    container_name: vaf
+    image: i3p4/vaf:latest
+    environment:
+      - TZ=Asia/Krasnoyarsk
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ./vaf:/afilter/data
+    restart: unless-stopped
+    ports:
+      - 8080:8080
+    privileged: false
+    #command: ["--host", "0.0.0.0", "--port", "8080", "--log-level", "DEBUG"]

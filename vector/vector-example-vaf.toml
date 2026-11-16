@@ -1,0 +1,89 @@
+data_dir = "/var/lib/vector"
+
+[sources.openwrt_source]
+type = "syslog"
+address = "0.0.0.0:5140"
+mode = "udp"
+
+[sources.docker_source]
+type = "docker_logs"
+exclude_containers = [ "vaf" ]
+
+[sources.system_source]
+type = "journald"
+exclude_units = [ "vector" ]
+
+# 1. Нормализация и удаление раскраски для OpenWrt
+[transforms.norm_openwrt]
+type = "remap"
+inputs = [ "openwrt_source" ]
+source = '''
+  raw_msg = to_string(.message) ?? ""
+  . = {
+    "host": "openwrt",
+    "unit": to_string(.appname) ?? "openwrt-syslog",
+    "message": strip_ansi_escape_codes(raw_msg)
+  }
+'''
+
+# 2. Нормализация и удаление раскраски для Docker-контейнеров
+[transforms.norm_docker]
+type = "remap"
+inputs = [ "docker_source" ]
+source = '''
+  raw_msg = to_string(.message) ?? ""
+  . = {
+    "host": to_string(.host) ?? "myhost",
+    "container": to_string(.container_name) ?? "unknown-container",
+    "message": strip_ansi_escape_codes(raw_msg)
+  }
+'''
+
+# 3. Нормализация и удаление раскраски для системных юнитов
+[transforms.norm_system]
+type = "remap"
+inputs = [ "system_source" ]
+source = '''
+  raw_msg = to_string(.message) ?? ""
+  . = {
+    "host": "myhost",
+    "unit": to_string(.SYSLOG_IDENTIFIER) ?? to_string(._SYSTEMD_UNIT) ?? "system",
+    "message": strip_ansi_escape_codes(raw_msg)
+  }
+'''
+
+# 4. Фильтрация по расширенному списку ключевых слов (без учета регистра)
+[transforms.filter_errors]
+type = "filter"
+inputs = [ "norm_openwrt", "norm_docker", "norm_system" ]
+condition = '''
+  match(downcase(string!(.message)), r'\b(error|err|critical|crit|fatal|panic|warn|warning|fail|failed|exception|alert|emerg|defect|issue)\b')
+'''
+
+# 5. Защита от шторма дубликатов на стороне Vector
+[transforms.dedupe_flood]
+type = "dedupe"
+inputs = [ "filter_errors" ]
+fields.match = [ "host", "container", "unit", "message" ]
+
+  [transforms.dedupe_flood.cache]
+  num_events = 5000
+
+  [transforms.dedupe_flood.time_settings]
+  max_age_ms = 10000
+  refresh_on_drop = false
+
+# 6. Пакетная отправка в vaf-сервис с дисковым буфером
+[sinks.alert_filter_http]
+type = "http"
+inputs = [ "dedupe_flood" ]
+uri = "http://myhost:8080/webhook/vector"
+method = "post"
+encoding.codec = "json"
+batch.max_events = 50
+batch.timeout_secs = 2
+
+  [sinks.alert_filter_http.buffer]
+  type = "disk"
+  max_size = 268435488
+  when_full = "block"

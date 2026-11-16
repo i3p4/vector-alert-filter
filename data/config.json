@@ -1,0 +1,28 @@
+{
+  "listen_host": "0.0.0.0",
+  "listen_port": 8080,
+  "log_level": "INFO",
+  "db_backend": "sqlite_memory",
+  "memory_flush_seconds": 3600,
+  "retention_days": 30,
+  "batch_delay_seconds": 300.0,
+  "base_url": "http://myhost:8080",
+  "smtp": {
+    "host": "myhost",
+    "port": 465,
+    "use_ssl": true,
+    "use_starttls": false,
+    "verify_ssl": false,
+    "user": "vaf@myhost",
+    "password": "mypassword",
+    "from_addr": "vaf@myhost",
+    "to_addrs": ["admin@myhost"]
+  },
+  "users": [
+    {
+      "username": "admin",
+      "password": "admin",
+      "api_key": "jyn47hnGTnuwX6jwbh91hgAhS"
+    }
+  ]
+}
