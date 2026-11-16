@@ -5,6 +5,7 @@ import ssl
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid
@@ -45,16 +46,22 @@ def _make_block_url(base_url: str, api_key: str, item: dict) -> str:
     return f"{base_url}/api/block?{query_params}"
 
 
-def build_and_send_alerts_email(alerts_to_send: list):
-    if not alerts_to_send:
-        return
+def _make_link_label(item: dict) -> str:
+    msg_preview = item["message"].strip()
+    if len(msg_preview) > 60:
+        msg_preview = msg_preview[:57] + "..."
+    return f"Заблокировать: {item['program']} — {msg_preview}"
 
-    api_key = get_first_available_api_key()
-    base_url = get_base_url()
+
+def _send_host_email(host: str, host_alerts: list, base_url: str, api_key: str):
+    unique_programs = list(OrderedDict.fromkeys(item["program"] for item in host_alerts))
+    programs_str = ", ".join(unique_programs)
+    total_count = len(host_alerts)
+    subject = f"Сбой: {host}: {programs_str}. ({total_count})"
 
     grouped = OrderedDict()
-    for item in alerts_to_send:
-        group_key = (item["host"], item["service"], item["program"])
+    for item in host_alerts:
+        group_key = (item["service"], item["program"])
         if group_key not in grouped:
             grouped[group_key] = []
         grouped[group_key].append(item)
@@ -62,21 +69,22 @@ def build_and_send_alerts_email(alerts_to_send: list):
     html_groups = []
     text_groups = []
 
-    for (host, service, program), items in grouped.items():
+    for (service, program), items in grouped.items():
         first_item = items[0]
         first_link = _make_block_url(base_url, api_key, first_item)
+        first_label = _make_link_label(first_item)
 
         group_html_parts = [
             "<article>",
-            f"<h2>{escape(host)} — [{escape(service)}] {escape(program)}</h2>",
+            f"<h2>[{escape(service)}] {escape(program)}</h2>",
             f"<p><strong>Сообщение:</strong><br>{escape(first_item['message'])}<br>"
-            f'<a href="{escape(first_link)}">Заблокировать эту связку</a></p>',
+            f'<a href="{escape(first_link)}">{escape(first_label)}</a></p>',
         ]
 
         group_text_parts = [
             f"host: {host} | {service}: {program}",
             f"  - Сообщение: {first_item['message']}",
-            f"    Заблокировать: {first_link}",
+            f"    {first_label}: {first_link}",
         ]
 
         if len(items) > 1:
@@ -84,18 +92,19 @@ def build_and_send_alerts_email(alerts_to_send: list):
             spoiler_entries = []
             for extra in remaining_items:
                 extra_link = _make_block_url(base_url, api_key, extra)
+                extra_label = _make_link_label(extra)
                 spoiler_entries.append(
                     f"<p>{escape(extra['message'])}<br>"
-                    f'<a href="{escape(extra_link)}">Заблокировать эту связку</a></p>'
+                    f'<a href="{escape(extra_link)}">{escape(extra_label)}</a></p>'
                 )
                 group_text_parts.append(
                     f"  - Сообщение: {extra['message']}\n"
-                    f"    Заблокировать: {extra_link}"
+                    f"    {extra_label}: {extra_link}"
                 )
 
             group_html_parts.append(
                 f"<details>"
-                f"<summary>Еще ({len(remaining_items)}) сообщений</summary>"
+                f"<summary>Еще ({len(remaining_items)}) сообщений для {escape(program)}</summary>"
                 f"{''.join(spoiler_entries)}"
                 f"</details>"
             )
@@ -106,7 +115,7 @@ def build_and_send_alerts_email(alerts_to_send: list):
         html_groups.append("\n".join(group_html_parts))
         text_groups.append("\n".join(group_text_parts))
 
-    subject = f"Новые события Vector ({len(alerts_to_send)})"
+    current_year = datetime.now().year
     full_html = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -114,17 +123,43 @@ def build_and_send_alerts_email(alerts_to_send: list):
     <title>{escape(subject)}</title>
 </head>
 <body>
-    <h1>{escape(subject)}</h1>
-    {''.join(html_groups)}
+    <main>
+        <h1>{escape(subject)}</h1>
+        {''.join(html_groups)}
+    </main>
+    <footer>
+        <p>&copy; VAF {current_year}</p>
+    </footer>
 </body>
 </html>"""
 
+    text_groups.append(f"© VAF {current_year}")
+
     logger.debug(
-        "Сформировано сгруппированное HTML-письмо (групп: %d, всего событий: %d).",
+        "Сформировано письмо для хоста %s (групп: %d, всего событий: %d).",
+        host,
         len(grouped),
-        len(alerts_to_send),
+        total_count,
     )
     send_smtp(subject, full_html, "\n".join(text_groups))
+
+
+def build_and_send_alerts_email(alerts_to_send: list):
+    if not alerts_to_send:
+        return
+
+    api_key = get_first_available_api_key()
+    base_url = get_base_url()
+
+    by_host = OrderedDict()
+    for item in alerts_to_send:
+        host = item["host"]
+        if host not in by_host:
+            by_host[host] = []
+        by_host[host].append(item)
+
+    for host, host_alerts in by_host.items():
+        _send_host_email(host, host_alerts, base_url, api_key)
 
 
 def send_smtp(subject: str, html_body: str, text_body: str):

@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import re
+from datetime import datetime, timezone
 
 logger = logging.getLogger("alert_filter.utils")
 
@@ -8,10 +9,12 @@ ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 DATETIME_PATTERNS = [
     r"\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?",
+    r"\d{4}/\d{2}/\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?",
     r"\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?",
     r"\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}",
     r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\b",
     r"\b\d{4}-\d{2}-\d{2}\b",
+    r"\b\d{4}/\d{2}/\d{2}\b",
     r"\b\d{2}\.\d{2}\.\d{4}\b",
     r"\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b",
     r"\b\d{10,13}\b",
@@ -105,3 +108,16 @@ def extract_clean_vector_event(event: dict) -> dict:
     }
     logger.debug("Сформирована очищенная структура события Vector: %s", result)
     return result
+
+
+def format_local_datetime(iso_str: str) -> str:
+    if not iso_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(iso_str))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local_dt = dt.astimezone()
+        return local_dt.strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return str(iso_str)[:19].replace("T", " ")

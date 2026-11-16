@@ -10,7 +10,7 @@ ARG WORK_SHELL="/bin/bash"
 ENV HOME="/afilter"
 
 LABEL org.i3p4.title="i3p4/vaf" \
-    org.i3p4.version="1.0"
+    org.i3p4.version="1.1"
 
 RUN groupadd -g "${WORK_GID}" "${WORK_GROUP}" \
     && useradd -m -d "${WORK_HOME}" -s "${WORK_SHELL}" -u "${WORK_UID}" -g "${WORK_GID}" "${WORK_USER}"

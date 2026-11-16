@@ -275,47 +275,71 @@ class BaseAlertDatabase(ABC):
         filter_unit: str = "",
         filter_container: str = "",
         search_msg: str = "",
-    ) -> List[dict]:
-        query = """
-            SELECT b.*, COUNT(e.id) as trigger_count
-            FROM bundles b
-            LEFT JOIN events e ON b.id = e.bundle_id
-            WHERE 1=1
-        """
+        page: int = 1,
+        page_size: int = 25,
+    ) -> dict:
+        where_clauses = ["1=1"]
         params = []
 
         if only_blocked:
-            query += " AND b.is_blocked = 1"
+            where_clauses.append("b.is_blocked = 1")
 
         if since_delta is not None:
             cutoff = (datetime.now(timezone.utc) - since_delta).isoformat()
-            query += " AND b.last_triggered >= ?"
+            where_clauses.append("b.last_triggered >= ?")
             params.append(cutoff)
 
         if filter_host:
-            query += " AND b.host = ?"
+            where_clauses.append("b.host = ?")
             params.append(filter_host)
 
         if filter_unit and filter_container:
-            query += " AND ((b.service = 'unit' AND b.program = ?) OR (b.service = 'container' AND b.program = ?))"
+            where_clauses.append(
+                "((b.service = 'unit' AND b.program = ?) OR (b.service = 'container' AND b.program = ?))"
+            )
             params.extend([filter_unit, filter_container])
         elif filter_unit:
-            query += " AND b.service = 'unit' AND b.program = ?"
+            where_clauses.append("b.service = 'unit' AND b.program = ?")
             params.append(filter_unit)
         elif filter_container:
-            query += " AND b.service = 'container' AND b.program = ?"
+            where_clauses.append("b.service = 'container' AND b.program = ?")
             params.append(filter_container)
 
         if search_msg:
-            query += " AND lower(b.message) LIKE ?"
+            where_clauses.append("lower(b.message) LIKE ?")
             params.append(f"%{search_msg.lower()}%")
 
-        query += " GROUP BY b.id ORDER BY b.last_triggered DESC"
+        where_sql = " AND ".join(where_clauses)
+        safe_page_size = max(1, int(page_size))
 
         def _op(conn: sqlite3.Connection):
             self._cleanup_old_records(conn)
-            rows = conn.execute(query, params).fetchall()
-            return [dict(r) for r in rows]
+
+            count_row = conn.execute(
+                f"SELECT COUNT(*) AS cnt FROM bundles b WHERE {where_sql}",
+                params,
+            ).fetchone()
+            total_count = int(count_row["cnt"]) if count_row else 0
+            total_pages = max(1, (total_count + safe_page_size - 1) // safe_page_size)
+            current_page = min(max(1, int(page)), total_pages)
+            offset = (current_page - 1) * safe_page_size
+
+            data_query = f"""
+                SELECT b.*, COUNT(e.id) as trigger_count
+                FROM bundles b
+                LEFT JOIN events e ON b.id = e.bundle_id
+                WHERE {where_sql}
+                GROUP BY b.id
+                ORDER BY b.last_triggered DESC
+                LIMIT ? OFFSET ?
+            """
+            rows = conn.execute(data_query, [*params, safe_page_size, offset]).fetchall()
+            return {
+                "items": [dict(r) for r in rows],
+                "total_count": total_count,
+                "total_pages": total_pages,
+                "current_page": current_page,
+            }
 
         return self._execute_read(_op)
 

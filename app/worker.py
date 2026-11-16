@@ -81,11 +81,14 @@ def _handle_ui_task(action: str, params: dict) -> Any:
             filter_unit=params.get("filter_unit", ""),
             filter_container=params.get("filter_container", ""),
             search_msg=params.get("search_msg", ""),
+            page=params.get("page", 1),
+            page_size=params.get("page_size", 25),
         )
     elif action == "fetch_filter_options":
         return db.fetch_filter_options()
     elif action == "fetch_bundle_by_id":
         return db.fetch_bundle_by_id(params["bundle_id"])
+
     elif action == "bulk_action":
         act = params["bulk_type"]
         ids = params["bundle_ids"]
@@ -146,11 +149,11 @@ def _handle_ui_task(action: str, params: dict) -> Any:
 
 def _bg_worker_loop():
     logger.debug("Поток бэкграунда запущен.")
-    flush_interval = max(10, get_memory_flush_seconds())
     last_flush = time.monotonic()
 
     try:
         while True:
+            flush_interval = max(10, get_memory_flush_seconds())
             now = time.monotonic()
             wait_timeout = max(1.0, flush_interval - (now - last_flush))
 
@@ -179,7 +182,7 @@ def _bg_worker_loop():
             finally:
                 bg_queue.task_done()
 
-            if (time.monotonic() - last_flush) >= flush_interval:
+            if (time.monotonic() - last_flush) >= max(10, get_memory_flush_seconds()):
                 db.flush_to_disk(force=False)
                 last_flush = time.monotonic()
     finally:
