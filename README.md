@@ -1,52 +1,55 @@
 # Vector Alert Filter (VAF)
 
-## Назначение сервиса
+**Language:** **English** | [Русский](README.ru.md)
 
-Микросервис Vector Alert Filter (VAF) принимает пакеты логов от агента Vector по HTTP-вебхуку, очищает текст сообщений от ANSI-цветов и меток даты и времени, группирует одинаковые ошибки в связки и сохраняет историю сработок в базу данных SQLite. Если связка не заблокирована пользователем, сервис объединяет события по каждому хосту и отправляет сводное HTML-уведомление на электронную почту через SMTP.
+## Service Overview
 
-В корне репозитория расположен готовый рабочий пример конфигурации агента Vector (`vector.toml`), который настраивает сбор логов (из syslog, Docker и systemd journald), первичную фильтрацию ошибок и приведение событий к нужной для микросервиса JSON-структуре (`host`, `container` или `unit`, `message`).
+The Vector Alert Filter (VAF) microservice receives log batches from a Vector agent over an HTTP/HTTPS webhook, strips ANSI color codes and date/time stamps from messages, groups identical errors into bundles, and stores trigger history in an SQLite database. If a bundle is not blocked by the user, the service groups events by host and sends a consolidated HTML and plain-text email digest via SMTP.
 
-## Важные примечания
+A ready-to-use Vector agent configuration example (`vector.toml`) is located in the repository root. It configures log collection (from syslog, Docker, and systemd journald), initial error filtering, and formatting events into the JSON structure expected by the microservice (`host`, `container` or `unit`, `message`).
 
-### Ограничения безопасности и область применения
+## Important Notes
 
-Приложение разработано для домашнего сервера (NAS) и доверенной локальной сети. Микросервис не предназначен для публичного размещения в интернете и критичных продакшн-сред, так как использует упрощённую модель безопасности (отсутствует защита от подбора паролей, CSRF-токенов и разграничение ролей, а вебхук приёма логов `/webhook/vector` открыт без авторизации).
+### Security Limitations and Scope
 
-### Принцип доступности (Accessibility First)
+This application is designed for a home server (NAS) and a trusted local network. The microservice is not intended for public internet exposure or critical production environments, as it uses a simplified security model (no brute-force protection, CSRF tokens, or role-based access control, and the `/webhook/vector` log ingestion endpoint is unauthenticated).
 
-Веб-интерфейс приложения и структура HTML-писем изначально проектируются с приоритетом максимального удобства для незрячих пользователей и программ экранного доступа (NVDA, JAWS, VoiceOver). Строгая семантическая разметка, логическая иерархия заголовков, понятные подписи ко всем полям и ссылкам, а также отсутствие визуального шума являются неизменным требованием проекта при любых дальнейших доработках.
+### Accessibility First Principle
 
-## Возможности веб-интерфейса и уведомлений
+The web interface and HTML email structure are designed from the ground up with maximum usability for blind users and screen readers (NVDA, JAWS, VoiceOver) as a top priority. Strict semantic markup, logical heading hierarchy, clear labels for all fields and links, and the absence of visual clutter remain mandatory requirements for any future updates.
 
-* Главная страница со списком связок: просмотр всех зафиксированных ошибок с количеством сработок и временем последнего события в локальном часовом поясе контейнера.
-* Гибкая фильтрация и поиск: отбор связок по временному периоду (от 1 часа до 30 дней или за всё время), по имени хоста, типу и имени источника (`unit` или `container`), по подстроке в тексте сообщения и по статусу блокировки.
-* Постраничная навигация: компактное переключение страниц вверху и внизу списка с сохранением всех активных фильтров.
-* Массовые и одиночные действия: блокировка, разблокировка и удаление выбранных связок со страницы списка (с возвратом на текущую страницу и сохранением фильтров) или из карточки конкретной связки.
-* Гибкие правила блокировки: возможность вручную создать связку или отредактировать существующую, используя двойные фигурные скобки `{{фрагмент текста}}` для блокировки всех логов, содержащих указанную подстроку.
-* Умные почтовые уведомления: группировка сбоев за заданный интервал времени с отправкой отдельного письма на каждый проблемный хост, информативной темой со списком затронутых программ, сворачиваемыми списками повторяющихся сообщений и прямыми ссылками для блокировки конкретной связки в один клик прямо из письма.
-* Страница настроек (`/settings`): изменение параметров сервера, базы данных, сроков хранения, размера страницы и настроек SMTP прямо из браузера с русскими названиями и пояснениями к каждому полю. Для защиты учётных данных редактирование пользователей, паролей и API-ключей через веб-интерфейс полностью заблокировано.
+## Web Interface and Notification Features
 
-## Переменные окружения и конфигурация
+* **Main Bundles List Page:** View all recorded errors along with trigger counts and the timestamp of the last event in the container's local time zone.
+* **Flexible Filtering and Search:** Filter bundles by time period (from 1 hour to 30 days or all time), hostname, source type and name (`unit` or `container`), message substring, and block status.
+* **Pagination:** Compact page navigation at both the top and bottom of the list while preserving all active filters.
+* **Bulk and Single Actions:** Block, unblock, and delete selected bundles directly from the list page (returning to the current page with filters intact) or from an individual bundle detail page.
+* **Flexible Blocking Rules:** Manually create a bundle or edit an existing one using double curly braces `{{text fragment}}` to block all logs containing the specified substring.
+* **Smart Email Notifications:** Group failures over a configurable delay interval and send a separate email per affected host, featuring a descriptive subject line with affected programs, collapsible lists for repeated messages, and one-click direct links to block a specific bundle straight from the email.
+* **Localization (i18n) and Templates:** Full support for Russian and English interfaces and emails, with easy addition of new languages by placing JSON dictionaries in `app/locales/`, and clean separation of logic from Jinja2 templates (`app/templates/`).
+* **Built-in HTTPS Support:** Enable encrypted connections directly in settings by specifying certificate and private key filenames located inside the `data/` directory.
+* **Settings Page (`/settings`):** Configure server, language, HTTPS, database, retention period, page size, and SMTP parameters directly from the browser with localized labels and descriptions for every field. To protect credentials, editing users, passwords, and API keys via the web interface is completely disabled.
 
-Переменные окружения задаются в секции `environment` файла `compose.yml` (или через `.env`, если вынести их туда):
+## Environment Variables and Configuration
 
-* `TZ` (строка, в проекте задано `Asia/Krasnoyarsk`) — задаёт часовой пояс внутри контейнера для корректного отображения локального времени сработок в веб-интерфейсе, заголовках писем и журнале работы приложения.
-* `HOME` (строка, задана в `Dockerfile` как `/afilter`) — определяет домашнюю директорию системного пользователя `afilter` (UID 1000, GID 1000), внутри которой размещены код приложения и каталог данных.
+Environment variables are configured in the `environment` section of `compose.yml` (or via an `.env` file):
 
-Дополнительно в контейнер пробрасываются системный файл времени и каталог конфигурации:
+* `TZ` (string, set to `Asia/Krasnoyarsk` in the project) — sets the time zone inside the container for accurate local timestamps in the web interface, email headers, and application logs.
 
-* `/etc/localtime:/etc/localtime:ro` — синхронизирует системное время контейнера с хост-машиной в режиме только для чтения.
-* `./vector-alert-filter:/afilter/data` — подключает постоянное хранилище на хосте для файла настроек `config.json` и файла базы данных `alerts.db`.
+Additionally, the system time file and configuration directory are mounted into the container:
 
-## Переопределение параметров запуска через command в compose.yml
+* `/etc/localtime:/etc/localtime:ro` — synchronizes the container's system time with the host machine in read-only mode.
+* `./vector-alert-filter:/afilter/data` — mounts persistent storage on the host for the `config.json` settings file, SSL certificates, and the `alerts.db` database file.
 
-Точка входа контейнера `ENTRYPOINT ["/afilter/main.py"]` принимает необязательные аргументы командной строки, которые имеют более высокий приоритет, чем значения в `data/config.json`. В файле `main.py` поддерживаются ровно три параметра:
+## Overriding Startup Parameters via `command` in `compose.yml`
 
-* `--host` (строка) — IP-адрес сетевого интерфейса для прослушивания (переопределяет `listen_host` из `config.json`).
-* `--port` (целое число) — TCP-порт веб-сервера и вебхука (переопределяет `listen_port` из `config.json`).
-* `--log-level` (строка: `DEBUG`, `INFO` или `ERROR`) — уровень подробности системного журнала (переопределяет `log_level` из `config.json`).
+The container entrypoint `ENTRYPOINT ["/afilter/main.py"]` accepts optional command-line arguments that take precedence over values in `data/config.json`. Exactly three arguments are supported in `main.py`:
 
-Пример использования секции `command` со всеми доступными параметрами в `compose.yml`:
+* `--host` (string) — network interface IP address to listen on (overrides `listen_host` in `config.json`).
+* `--port` (integer) — TCP port for the web server and webhook (overrides `listen_port` in `config.json`).
+* `--log-level` (string: `DEBUG`, `INFO`, or `ERROR`) — system log verbosity level (overrides `log_level` in `config.json`).
+
+Example of using the `command` section with all available parameters in `compose.yml`:
 
 ```yaml
 services:
@@ -65,25 +68,60 @@ services:
     command: ["--host", "0.0.0.0", "--port", "8080", "--log-level", "DEBUG"]
 ```
 
-## Команды управления контейнером
+## Container Management Commands
 
-Все команды выполняются из каталога проекта, где расположен файл `compose.yml`.
+All commands are executed from the project directory containing `compose.yml`.
 
-1. Первый запуск и сборка образа:
-   `docker compose up -d --build`
-2. Пересборка образа после изменения Python-кода в папке `app/`, файла `main.py` или списка зависимостей в `requirements.txt` (если используется локальная сборка из `Dockerfile`):
-   `docker build -t i3p4/vector-alert-filter:latest . && docker compose up -d`
-3. Принудительное пересоздание контейнера после изменения `compose.yml`, секции `command` или переменных окружения:
-   `docker compose up -d --force-recreate`
-4. Просмотр логов работы сервиса в реальном времени (выход из просмотра по `Ctrl+C`):
-   `docker compose logs -f vector-alert-filter`
-5. Просмотр последних 100 строк логов:
-   `docker compose logs --tail=100 vector-alert-filter`
-6. Перезапуск сервиса (необходим после изменения `listen_host`, `listen_port`, `log_level` или `db_backend` через веб-интерфейс):
-   `docker compose restart vector-alert-filter`
-7. Остановка и удаление контейнера (данные в `./vector-alert-filter` сохраняются):
-   `docker compose down`
-8. Открыть отдельную командную строку внутри работающего контейнера (для выхода без остановки сервиса введите `exit`):
-   `docker compose exec -it vector-alert-filter /bin/bash`
-9. Подключиться напрямую к потоку ввода-вывода главного запущенного процесса (для безопасного отключения без остановки контейнера нажмите `Ctrl+P`, затем `Ctrl+Q`; нажатие `Ctrl+C` остановит контейнер):
-   `docker attach vector-alert-filter`
+1. Local image build without starting the container (after modifying Python code in `app/`, `main.py`, or dependencies in `requirements.txt`):
+
+```bash
+docker build -t i3p4/vector-alert-filter:latest .
+```
+
+2. Start the container in detached mode without building:
+
+```bash
+docker compose up -d
+```
+
+3. Force recreate the container after modifying `compose.yml`, the `command` section, or environment variables:
+
+```bash
+docker compose up -d --force-recreate
+```
+
+4. View live service logs (press `Ctrl+C` to exit):
+
+```bash
+docker compose logs -f vector-alert-filter
+```
+
+5. View the last 100 lines of logs:
+
+```bash
+docker compose logs --tail=100 vector-alert-filter
+```
+
+6. Restart the service (required after changing `listen_host`, `listen_port`, `log_level`, `db_backend`, `https_enabled`, `ssl_certfile`, or `ssl_keyfile` via the web interface):
+
+```bash
+docker compose restart vector-alert-filter
+```
+
+7. Stop and remove the container (data in `./vector-alert-filter` is preserved):
+
+```bash
+docker compose down
+```
+
+8. Open an interactive shell inside the running container (type `exit` to leave without stopping the service):
+
+```bash
+docker compose exec -it vector-alert-filter /bin/bash
+```
+
+9. Attach directly to the main running process standard input/output (press `Ctrl+P` followed by `Ctrl+Q` to detach safely without stopping the container; `Ctrl+C` will stop the container):
+
+```bash
+docker attach vector-alert-filter
+```
