@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ page_title }} — {{ t('app_title') }}</title>
+</head>
+<body>
+    {% if user and not user.get('api_key') %}
+    <div role="alert" style="border: 2px solid red; padding: 10px; margin-bottom: 15px;">
+        <strong>{{ t('warn_no_api_key_title') }}</strong> {{ t('warn_no_api_key_body') }}
+    </div>
+    {% endif %}
+
+    {% if user %}
+    <nav aria-label="{{ t('nav_aria_label') }}">
+        <a href="/">{{ t('nav_home') }}</a> |
+        <a href="/bundle/new">{{ t('nav_new_bundle') }}</a> |
+        <a href="/settings">{{ t('nav_settings') }}</a> |
+        <span>{{ t('nav_user', username=user['username']) }}</span> |
+        <a href="/logout">{{ t('nav_logout') }}</a>
+    </nav>
+    <hr>
+    {% endif %}
+
+    <main>
+        <h1>{{ page_title }}</h1>
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer>
+        <hr>
+        <p>&copy; VAF {{ current_year }}</p>
+    </footer>
+</body>
+</html>

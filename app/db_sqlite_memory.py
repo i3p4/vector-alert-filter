@@ -1,3 +1,5 @@
+"""Реализация хранилища алертов в оперативной памяти на базе SQLite."""
+
 import logging
 import os
 import sqlite3
@@ -10,11 +12,15 @@ logger = logging.getLogger("alert_filter.db_memory")
 
 
 class MemorySqliteDatabase(BaseAlertDatabase):
-    def __init__(self):
+    """Хранилище связок и событий в `:memory:` SQLite с периодическим сбросом на диск."""
+
+    def __init__(self) -> None:
+        """Инициализирует внутреннее состояние подключения и флаг несохраненных данных."""
         self._mem_conn: Optional[sqlite3.Connection] = None
         self._is_dirty: bool = False
 
-    def init(self):
+    def init(self) -> None:
+        """Создает БД в памяти, загружает снимок с диска (при наличии) и строит схему."""
         try:
             os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
             self._mem_conn = sqlite3.connect(":memory:", check_same_thread=False)
@@ -36,6 +42,7 @@ class MemorySqliteDatabase(BaseAlertDatabase):
             raise
 
     def _execute_read(self, callback):
+        """Выполняет операцию чтения в БД в оперативной памяти."""
         if self._mem_conn is None:
             raise RuntimeError("База данных в памяти не инициализирована.")
         try:
@@ -46,6 +53,7 @@ class MemorySqliteDatabase(BaseAlertDatabase):
             raise
 
     def _execute_write(self, callback):
+        """Выполняет операцию записи в БД в памяти и отмечает наличие изменений."""
         if self._mem_conn is None:
             raise RuntimeError("База данных в памяти не инициализирована.")
         try:
@@ -57,7 +65,8 @@ class MemorySqliteDatabase(BaseAlertDatabase):
             logger.error("Ошибка записи в БД в памяти: %s", e, exc_info=True)
             raise
 
-    def flush_to_disk(self, force: bool = False):
+    def flush_to_disk(self, force: bool = False) -> None:
+        """Сохраняет резервную копию БД из памяти на диск при наличии изменений."""
         if self._mem_conn is None:
             return
         if not self._is_dirty and not force:
@@ -73,7 +82,8 @@ class MemorySqliteDatabase(BaseAlertDatabase):
         except Exception as e:
             logger.error("Ошибка сброса базы данных из памяти на диск: %s", e, exc_info=True)
 
-    def close(self):
+    def close(self) -> None:
+        """Сбрасывает несохраненные данные на диск и закрывает соединение в памяти."""
         self.flush_to_disk(force=False)
         if self._mem_conn is not None:
             self._mem_conn.close()

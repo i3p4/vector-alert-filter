@@ -1,3 +1,10 @@
+"""Модуль управления конфигурацией приложения.
+
+Обеспечивает загрузку настроек из `data/config.json`, безопасный доступ к параметрам
+сервера, базы данных, почты, локализации и HTTPS, а также атомарное сохранение
+изменений из веб-интерфейса с проверкой белых и черных списков ключей.
+"""
+
 import hashlib
 import json
 import logging
@@ -17,9 +24,13 @@ DB_PATH = DATA_DIR / "alerts.db"
 _config_lock = threading.Lock()
 
 ALLOWED_TOP_LEVEL_KEYS = frozenset({
+    "language",
     "listen_host",
     "listen_port",
     "log_level",
+    "https_enabled",
+    "ssl_certfile",
+    "ssl_keyfile",
     "db_backend",
     "memory_flush_seconds",
     "retention_days",
@@ -49,6 +60,14 @@ FORBIDDEN_KEYS = frozenset({
 
 
 def load_config() -> dict:
+    """Загружает конфигурацию приложения из файла `data/config.json`.
+
+    Returns:
+        Словарь с параметрами конфигурации.
+
+    Raises:
+        FileNotFoundError: Если файл конфигурации отсутствует.
+    """
     if not CONFIG_PATH.exists():
         raise FileNotFoundError(f"Файл конфигурации не найден по пути: {CONFIG_PATH}")
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -58,35 +77,86 @@ def load_config() -> dict:
 CONFIG = load_config()
 
 
+def get_language() -> str:
+    """Возвращает код активного языка интерфейса и уведомлений.
+
+    Returns:
+        Код языка в нижнем регистре (по умолчанию 'ru').
+    """
+    return str(CONFIG.get("language", "ru")).strip().lower() or "ru"
+
+
 def get_listen_host() -> str:
+    """Возвращает IP-адрес интерфейса для прослушивания HTTP/HTTPS сервера."""
     return str(CONFIG.get("listen_host", "0.0.0.0"))
 
 
 def get_listen_port() -> int:
+    """Возвращает TCP-порт для прослушивания HTTP/HTTPS сервера."""
     return int(CONFIG.get("listen_port", 8080))
 
 
 def get_log_level() -> str:
+    """Возвращает уровень логирования приложения в верхнем регистре."""
     return str(CONFIG.get("log_level", "INFO")).upper()
 
 
+def is_https_enabled() -> bool:
+    """Возвращает флаг включения режима HTTPS для встроенного сервера."""
+    return bool(CONFIG.get("https_enabled", False))
+
+
+def get_ssl_cert_filename() -> str:
+    """Возвращает имя файла SSL-сертификата из конфигурации."""
+    return str(CONFIG.get("ssl_certfile", "")).strip()
+
+
+def get_ssl_key_filename() -> str:
+    """Возвращает имя файла приватного ключа SSL из конфигурации."""
+    return str(CONFIG.get("ssl_keyfile", "")).strip()
+
+
+def resolve_data_file(filename: str) -> Path:
+    """Безопасно преобразует имя файла в полный путь внутри `DATA_DIR`.
+
+    Защищает от выхода за пределы директории данных (Path Traversal).
+
+    Args:
+        filename: Имя файла без указания директорий.
+
+    Returns:
+        Полный объект `Path` внутри `DATA_DIR`.
+
+    Raises:
+        ValueError: Если передано пустое имя или имя содержит разделители пути.
+    """
+    clean_name = filename.strip()
+    if not clean_name or Path(clean_name).name != clean_name or clean_name in (".", ".."):
+        raise ValueError(f"Некорректное имя файла: {filename}")
+    return DATA_DIR / clean_name
+
 def get_db_backend() -> str:
+    """Возвращает выбранный бэкенд базы данных ('sqlite_disk' или 'sqlite_memory')."""
     return str(CONFIG.get("db_backend", "sqlite_disk")).lower().strip()
 
 
 def get_memory_flush_seconds() -> int:
+    """Возвращает интервал сброса БД из оперативной памяти на диск в секундах."""
     return int(CONFIG.get("memory_flush_seconds", 3600))
 
 
 def get_retention_days() -> int:
+    """Возвращает срок хранения истории сработок и связок в днях."""
     return int(CONFIG.get("retention_days", 30))
 
 
 def get_batch_delay_seconds() -> float:
+    """Возвращает время ожидания группировки событий перед отправкой письма."""
     return float(CONFIG.get("batch_delay_seconds", 300.0))
 
 
 def get_page_size() -> int:
+    """Возвращает количество связок, отображаемых на одной странице."""
     try:
         val = int(CONFIG.get("page_size", 25))
         return max(1, val)
@@ -95,19 +165,31 @@ def get_page_size() -> int:
 
 
 def get_base_url() -> str:
+    """Возвращает базовый внешний URL приложения без завершающего слэша."""
     return str(CONFIG.get("base_url", "")).rstrip("/")
 
 
 def get_smtp_config() -> dict:
+    """Возвращает словарь настроек SMTP-клиента."""
     return CONFIG.get("smtp", {})
 
 
 def get_session_secret() -> str:
+    """Вычисляет детерминированный SHA-256 секрет для подписи сессионных кук."""
     raw = json.dumps(CONFIG, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
 
 def find_user_by_credentials(username: str, password: str) -> Optional[dict]:
+    """Ищет пользователя по логину и паролю.
+
+    Args:
+        username: Имя пользователя.
+        password: Пароль пользователя.
+
+    Returns:
+        Словарь данных пользователя при совпадении или None.
+    """
     for u in CONFIG.get("users", []):
         if u.get("username") == username and u.get("password") == password:
             return u
@@ -115,6 +197,7 @@ def find_user_by_credentials(username: str, password: str) -> Optional[dict]:
 
 
 def find_user_by_username(username: str) -> Optional[dict]:
+    """Ищет пользователя по его имени (логину)."""
     for u in CONFIG.get("users", []):
         if u.get("username") == username:
             return u
@@ -122,6 +205,7 @@ def find_user_by_username(username: str) -> Optional[dict]:
 
 
 def find_user_by_api_key(api_key: str) -> Optional[dict]:
+    """Ищет пользователя по уникальному API-ключу быстрой блокировки."""
     if not api_key:
         return None
     for u in CONFIG.get("users", []):
@@ -131,6 +215,7 @@ def find_user_by_api_key(api_key: str) -> Optional[dict]:
 
 
 def get_first_available_api_key() -> str:
+    """Возвращает первый непустой `api_key` из списка пользователей."""
     for u in CONFIG.get("users", []):
         if u.get("api_key"):
             return str(u["api_key"])
@@ -138,6 +223,7 @@ def get_first_available_api_key() -> str:
 
 
 def get_editable_settings() -> dict:
+    """Возвращает словарь безопасных настроек для отображения в веб-форме."""
     with _config_lock:
         smtp = CONFIG.get("smtp", {})
         to_addrs = smtp.get("to_addrs", [])
@@ -147,9 +233,13 @@ def get_editable_settings() -> dict:
             to_addrs_str = str(to_addrs)
 
         return {
+            "language": get_language(),
             "listen_host": get_listen_host(),
             "listen_port": get_listen_port(),
             "log_level": get_log_level(),
+            "https_enabled": is_https_enabled(),
+            "ssl_certfile": get_ssl_cert_filename(),
+            "ssl_keyfile": get_ssl_key_filename(),
             "db_backend": get_db_backend(),
             "memory_flush_seconds": get_memory_flush_seconds(),
             "retention_days": get_retention_days(),
@@ -167,7 +257,15 @@ def get_editable_settings() -> dict:
         }
 
 
-def update_allowed_settings(validated_data: dict[str, Any]):
+def update_allowed_settings(validated_data: dict[str, Any]) -> None:
+    """Проверяет и атомарно сохраняет разрешенные настройки в `config.json`.
+
+    Args:
+        validated_data: Словарь провалидированных параметров верхнего уровня и секции `smtp`.
+
+    Raises:
+        ValueError: При попытке изменить запрещенные или неизвестные ключи.
+    """
     for key in validated_data:
         if key in FORBIDDEN_KEYS or key not in ALLOWED_TOP_LEVEL_KEYS:
             raise ValueError(f"Попытка изменения запрещенного параметра конфигурации: {key}")

@@ -1,14 +1,14 @@
 
 services:
 
-  vaf:
-    container_name: vaf
-    image: i3p4/vaf:latest
+  vector-alert-filter:
+    container_name: vector-alert-filter
+    image: i3p4/vector-alert-filter:latest
     environment:
       - TZ=Asia/Krasnoyarsk
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - ./vaf:/afilter/data
+      - ./vector-alert-filter:/afilter/data
     restart: unless-stopped
     ports:
       - 8080:8080

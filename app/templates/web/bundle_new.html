@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block content %}
+<p>{{ t('new_bundle_hint_prefix') }} <code>&#123;&#123;Connection refused&#125;&#125;</code>.</p>
+
+<form method="post" action="/bundle/new">
+    <div>
+        <label for="host">{{ t('new_bundle_host') }}</label><br>
+        <input type="text" id="host" name="host" required size="50">
+    </div><br>
+    <div>
+        <label for="service">{{ t('new_bundle_service') }}</label><br>
+        <select id="service" name="service">
+            <option value="container">container</option>
+            <option value="unit">unit</option>
+            <option value="unknown">unknown</option>
+        </select>
+    </div><br>
+    <div>
+        <label for="program">{{ t('new_bundle_program') }}</label><br>
+        <input type="text" id="program" name="program" required size="50">
+    </div><br>
+    <div>
+        <label for="message">{{ t('new_bundle_message') }}</label><br>
+        <textarea id="message" name="message" rows="3" cols="60" required></textarea>
+    </div><br>
+    <div>
+        <label for="description">{{ t('new_bundle_desc') }}</label><br>
+        <textarea id="description" name="description" rows="3" cols="60"></textarea>
+    </div><br>
+    <div>
+        <input type="checkbox" id="is_blocked" name="is_blocked" value="1" checked>
+        <label for="is_blocked">{{ t('new_bundle_block_now') }}</label>
+    </div><br>
+    <button type="submit">{{ t('new_bundle_submit') }}</button>
+</form>
+{% endblock %}

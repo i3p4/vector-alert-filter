@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}">
+<head>
+    <meta charset="utf-8">
+    <title>{{ subject }}</title>
+</head>
+<body>
+    <main>
+        <h1>{{ subject }}</h1>
+        {% for group in groups %}
+        <article>
+            <h2>[{{ group.service }}] {{ group.program }}</h2>
+            <p>
+                <strong>{{ t('mail_message_label') }}</strong><br>
+                {{ group.first_item.message }}<br>
+                <a href="{{ group.first_item.block_url }}">{{ group.first_item.link_label }}</a>
+            </p>
+            {% if group.extra_items %}
+            <details>
+                <summary>{{ t('mail_more_messages', count=group.extra_items | length, program=group.program) }}</summary>
+                {% for extra in group.extra_items %}
+                <p>
+                    {{ extra.message }}<br>
+                    <a href="{{ extra.block_url }}">{{ extra.link_label }}</a>
+                </p>
+                {% endfor %}
+            </details>
+            {% endif %}
+        </article>
+        <hr>
+        {% endfor %}
+    </main>
+    <footer>
+        <p>&copy; VAF {{ current_year }}</p>
+    </footer>
+</body>
+</html>

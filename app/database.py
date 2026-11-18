@@ -1,3 +1,9 @@
+"""Фабрика инициализации экземпляра базы данных приложения.
+
+Создает и экспортирует глобальный объект `db`, реализующий интерфейс
+`BaseAlertDatabase` в соответствии с выбранным режимом хранения (`db_backend`).
+"""
+
 import logging
 
 from app.config import get_db_backend
@@ -9,6 +15,14 @@ logger = logging.getLogger("alert_filter.database")
 
 
 def create_database_instance() -> BaseAlertDatabase:
+    """Создает экземпляр хранилища SQLite согласно настройке `db_backend`.
+
+    Returns:
+        Экземпляр `MemorySqliteDatabase` или `DiskSqliteDatabase`.
+
+    Raises:
+        ValueError: Если в `config.json` указан неподдерживаемый тип БД.
+    """
     backend = get_db_backend()
     if backend == "sqlite_memory":
         logger.debug("Выбран режим базы данных: SQLite в оперативной памяти (sqlite_memory).")

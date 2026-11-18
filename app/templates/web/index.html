@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+
+{% block content %}
+<form method="get" action="/" aria-label="{{ t('index_filter_aria') }}">
+    <div>
+        <label for="period">{{ t('index_period') }}</label>
+        <select id="period" name="period">
+            {% for p_key, p_label in period_options %}
+            <option value="{{ p_key }}" {% if p_key == period %}selected{% endif %}>{{ p_label }}</option>
+            {% endfor %}
+        </select>
+
+        <label for="filter_host">{{ t('index_host') }}</label>
+        <select id="filter_host" name="filter_host">
+            <option value="">{{ t('index_all_hosts') }}</option>
+            {% for h in filter_hosts %}
+            <option value="{{ h }}" {% if h == clean_host %}selected{% endif %}>{{ h }}</option>
+            {% endfor %}
+        </select>
+
+        <label for="filter_unit">{{ t('index_unit') }}</label>
+        <select id="filter_unit" name="filter_unit">
+            <option value="">{{ t('index_all_units') }}</option>
+            {% for u in filter_units %}
+            <option value="{{ u }}" {% if u == clean_unit %}selected{% endif %}>{{ u }}</option>
+            {% endfor %}
+        </select>
+
+        <label for="filter_container">{{ t('index_container') }}</label>
+        <select id="filter_container" name="filter_container">
+            <option value="">{{ t('index_all_containers') }}</option>
+            {% for c in filter_containers %}
+            <option value="{{ c }}" {% if c == clean_container %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div>
+        <label for="search_msg">{{ t('index_search_msg') }}</label>
+        <input type="text" id="search_msg" name="search_msg" value="{{ clean_search }}" size="30">
+
+        <input type="checkbox" id="only_blocked" name="only_blocked" value="1" {% if only_blocked == 1 %}checked{% endif %}>
+        <label for="only_blocked">{{ t('index_only_blocked') }}</label>
+
+        <button type="submit">{{ t('index_apply') }}</button>
+        <a href="/">{{ t('index_reset') }}</a>
+    </div>
+</form>
+<hr>
+
+{% if not rows %}
+<p>{{ t('index_empty') }}</p>
+{% else %}
+{% if pagination.total_pages > 1 %}
+<nav aria-label="{{ t('pagination_aria') }}">
+    {% if pagination.current_page <= 1 %}
+    <span aria-label="{{ t('pagination_first') }}" aria-disabled="true">&lt;&lt;</span>
+    {% else %}
+    <a href="{{ pagination.first_url }}" aria-label="{{ t('pagination_first') }}">&lt;&lt;</a>
+    {% endif %}
+    {% for token in pagination.tokens %}
+        {% if not loop.first %}, {% endif %}
+        {% if token.type == 'ellipsis' %}...
+        {% elif token.type == 'current' %}<span aria-current="page"><strong>{{ token.page }}</strong></span>
+        {% else %}<a href="{{ token.url }}" aria-label="{{ t('pagination_page', page=token.page) }}">{{ token.page }}</a>
+        {% endif %}
+    {% endfor %}
+    {% if pagination.current_page >= pagination.total_pages %}
+    <span aria-label="{{ t('pagination_last') }}" aria-disabled="true">&gt;&gt;</span>
+    {% else %}
+    <a href="{{ pagination.last_url }}" aria-label="{{ t('pagination_last') }}">&gt;&gt;</a>
+    {% endif %}
+</nav>
+{% endif %}
+
+<form method="post" action="/bulk-action">
+    <input type="hidden" name="period" value="{{ period }}">
+    <input type="hidden" name="filter_host" value="{{ clean_host }}">
+    <input type="hidden" name="filter_unit" value="{{ clean_unit }}">
+    <input type="hidden" name="filter_container" value="{{ clean_container }}">
+    <input type="hidden" name="search_msg" value="{{ clean_search }}">
+    <input type="hidden" name="only_blocked" value="{{ 1 if only_blocked == 1 else 0 }}">
+    <input type="hidden" name="page" value="{{ pagination.current_page }}">
+
+    <div>
+        <button type="submit" name="action" value="block">{{ t('index_btn_block') }}</button>
+        <button type="submit" name="action" value="unblock">{{ t('index_btn_unblock') }}</button>
+        <button type="submit" name="action" value="delete">{{ t('index_btn_delete') }}</button>
+    </div>
+
+    <h2>{{ t('index_found_heading', count=total_count) }}</h2>
+    <table border="1">
+        <thead>
+            <tr>
+                <th scope="col">
+                    <input type="checkbox" id="select_all">
+                    <label for="select_all">{{ t('index_select_all') }}</label>
+                </th>
+                <th scope="col">{{ t('index_col_host') }}</th>
+                <th scope="col">{{ t('index_col_type') }}</th>
+                <th scope="col">{{ t('index_col_program') }}</th>
+                <th scope="col">{{ t('index_col_desc') }}</th>
+                <th scope="col">{{ t('index_col_last') }}</th>
+                <th scope="col">{{ t('index_col_status') }}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in rows %}
+            <tr>
+                <td>
+                    <input type="checkbox" class="row-chk" id="chk_{{ r.id }}" name="bundle_ids" value="{{ r.id }}">
+                    <label for="chk_{{ r.id }}">{{ t('index_select_row', host=r.host, service=r.service, program=r.program) }}</label>
+                </td>
+                <th scope="row"><a href="/bundle/{{ r.id }}">{{ r.host }}</a></th>
+                <td>{{ r.service }}</td>
+                <td>{{ r.program }}</td>
+                <td>{{ r.desc_short }}</td>
+                <td>{{ r.last_dt }} {{ t('index_triggers_count', count=r.trigger_count) }}</td>
+                <td>{% if r.is_blocked %}{{ t('index_status_blocked') }}{% else %}{{ t('index_status_active') }}{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table><br>
+
+    <div>
+        <button type="submit" name="action" value="block">{{ t('index_btn_block') }}</button>
+        <button type="submit" name="action" value="unblock">{{ t('index_btn_unblock') }}</button>
+        <button type="submit" name="action" value="delete">{{ t('index_btn_delete') }}</button>
+    </div>
+</form>
+
+{% if pagination.total_pages > 1 %}
+<nav aria-label="{{ t('pagination_aria') }}">
+    {% if pagination.current_page <= 1 %}
+    <span aria-label="{{ t('pagination_first') }}" aria-disabled="true">&lt;&lt;</span>
+    {% else %}
+    <a href="{{ pagination.first_url }}" aria-label="{{ t('pagination_first') }}">&lt;&lt;</a>
+    {% endif %}
+    {% for token in pagination.tokens %}
+        {% if not loop.first %}, {% endif %}
+        {% if token.type == 'ellipsis' %}...
+        {% elif token.type == 'current' %}<span aria-current="page"><strong>{{ token.page }}</strong></span>
+        {% else %}<a href="{{ token.url }}" aria-label="{{ t('pagination_page', page=token.page) }}">{{ token.page }}</a>
+        {% endif %}
+    {% endfor %}
+    {% if pagination.current_page >= pagination.total_pages %}
+    <span aria-label="{{ t('pagination_last') }}" aria-disabled="true">&gt;&gt;</span>
+    {% else %}
+    <a href="{{ pagination.last_url }}" aria-label="{{ t('pagination_last') }}">&gt;&gt;</a>
+    {% endif %}
+</nav>
+{% endif %}
+
+<script>
+    (function() {
+        const selectAll = document.getElementById('select_all');
+        const rowChks = document.querySelectorAll('.row-chk');
+        if (!selectAll) return;
+        selectAll.addEventListener('change', function() {
+            rowChks.forEach(function(cb) { cb.checked = selectAll.checked; });
+        });
+        rowChks.forEach(function(cb) {
+            cb.addEventListener('change', function() {
+                selectAll.checked = Array.from(rowChks).every(function(c) { return c.checked; });
+            });
+        });
+    })();
+</script>
+{% endif %}
+{% endblock %}

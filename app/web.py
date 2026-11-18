@@ -1,44 +1,64 @@
+"""Модуль маршрутизации веб-интерфейса и HTTP API приложения.
+
+Обеспечивает рендеринг HTML-шаблонов Jinja2 из директории `app/templates/web`
+с поддержкой локализации, аутентификацию пользователей по сессиям, прием вебхуков
+от Vector, быструю блокировку по API-ключу, фильтрацию, пагинацию и управление
+настройками приложения (включая язык и параметры HTTPS).
+"""
+
 import logging
 from datetime import datetime, timedelta
-from html import escape
+from pathlib import Path
 from typing import Any, List, Optional
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Body, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
 
 from app.config import (
     find_user_by_api_key,
     find_user_by_credentials,
     find_user_by_username,
     get_editable_settings,
+    get_language,
     get_page_size,
     get_retention_days,
+    resolve_data_file,
     update_allowed_settings,
 )
+from app.i18n import get_available_languages, translate
 from app.utils import format_local_datetime, is_substring_pattern
 from app.worker import submit_ui_task, submit_vector_payload
 
 logger = logging.getLogger("alert_filter.web")
 router = APIRouter()
 
-PERIOD_MAP = {
-    "1h": ("За последний 1 час", timedelta(hours=1)),
-    "3h": ("За последние 3 часа", timedelta(hours=3)),
-    "6h": ("За последние 6 часов", timedelta(hours=6)),
-    "12h": ("За последние 12 часов", timedelta(hours=12)),
-    "1d": ("За 1 день", timedelta(days=1)),
-    "3d": ("За 3 дня", timedelta(days=3)),
-    "7d": ("За 7 дней", timedelta(days=7)),
-    "15d": ("За 15 дней", timedelta(days=15)),
-    "30d": ("За 1 месяц", timedelta(days=30)),
-    "all": ("Показать все связки", None),
+WEB_TEMPLATES_DIR = Path(__file__).resolve().parent / "templates" / "web"
+templates = Jinja2Templates(directory=str(WEB_TEMPLATES_DIR))
+templates.env.globals["t"] = translate
+
+PERIOD_DELTAS: dict[str, Optional[timedelta]] = {
+    "1h": timedelta(hours=1),
+    "3h": timedelta(hours=3),
+    "6h": timedelta(hours=6),
+    "12h": timedelta(hours=12),
+    "1d": timedelta(days=1),
+    "3d": timedelta(days=3),
+    "7d": timedelta(days=7),
+    "15d": timedelta(days=15),
+    "30d": timedelta(days=30),
+    "all": None,
 }
 
 ALLOWED_SETTINGS_FORM_FIELDS = frozenset({
+    "language",
     "listen_host",
     "listen_port",
     "log_level",
+    "https_enabled",
+    "ssl_certfile",
+    "ssl_keyfile",
     "db_backend",
     "memory_flush_seconds",
     "retention_days",
@@ -58,96 +78,81 @@ ALLOWED_SETTINGS_FORM_FIELDS = frozenset({
 
 
 def get_current_user(request: Request) -> Optional[dict]:
+    """Возвращает словарь данных текущего авторизованного пользователя или None."""
     username = request.session.get("user")
     if not username:
         return None
     return find_user_by_username(username)
 
 
-def render_page(title: str, content: str, user: Optional[dict] = None) -> HTMLResponse:
-    warning_html = ""
-    if user and not user.get("api_key"):
-        warning_html = (
-            '<div role="alert" style="border: 2px solid red; padding: 10px; margin-bottom: 15px;">'
-            "<strong>Внимание:</strong> В файле настроек для вашего пользователя не задан уникальный ключ (api_key). "
-            "Ссылки быстрой блокировки в письмах работать не будут."
-            "</div>"
-        )
+def render_template(
+    request: Request,
+    template_name: str,
+    page_title: str,
+    user: Optional[dict] = None,
+    status_code: int = 200,
+    **context: Any,
+) -> HTMLResponse:
+    """Рендерит HTML-шаблон Jinja2 с общими переменными контекста.
 
-    nav_html = ""
-    if user:
-        nav_html = (
-            '<nav aria-label="Основная навигация">'
-            '<a href="/">Главная (список связок)</a> | '
-            '<a href="/bundle/new">Создать новую связку вручную</a> | '
-            '<a href="/settings">Настройки</a> | '
-            f'<span>Пользователь: {escape(user["username"])}</span> | '
-            '<a href="/logout">Выйти</a>'
-            "</nav><hr>"
-        )
+    Args:
+        request: Текущий HTTP-запрос FastAPI.
+        template_name: Имя файла шаблона внутри `app/templates/web`.
+        page_title: Локализованный заголовок страницы.
+        user: Словарь текущего пользователя или None для неавторизованных страниц.
+        status_code: HTTP-код ответа.
+        **context: Дополнительные переменные для передачи в шаблон.
 
-    current_year = datetime.now().year
-    full_html = f"""<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{escape(title)} — Фильтр алертов Vector</title>
-</head>
-<body>
-    {warning_html}
-    {nav_html}
-    <main>
-        <h1>{escape(title)}</h1>
-        {content}
-    </main>
-    <footer>
-        <hr>
-        <p>&copy; VAF {current_year}</p>
-    </footer>
-</body>
-</html>"""
-    return HTMLResponse(full_html)
+    Returns:
+        Готовый HTML-ответ (`HTMLResponse`).
+    """
+    base_context = {
+        "lang": get_language(),
+        "page_title": page_title,
+        "user": user,
+        "current_year": datetime.now().year,
+    }
+    base_context.update(context)
+    return templates.TemplateResponse(
+        request=request,
+        name=template_name,
+        context=base_context,
+        status_code=status_code,
+    )
 
 @router.get("/login", response_class=HTMLResponse)
-def login_page(error: str = ""):
-    err_block = f'<p role="alert">{escape(error)}</p>' if error else ""
-    html = f"""
-    {err_block}
-    <form method="post" action="/login">
-        <div>
-            <label for="username">Логин:</label><br>
-            <input type="text" id="username" name="username" required autocomplete="username">
-        </div><br>
-        <div>
-            <label for="password">Пароль:</label><br>
-            <input type="password" id="password" name="password" required autocomplete="current-password">
-        </div><br>
-        <button type="submit">Войти в систему</button>
-    </form>
-    """
-    return render_page("Вход в систему", html)
+def login_page(request: Request, error: str = ""):
+    """Отображает страницу входа в систему."""
+    return render_template(
+        request,
+        "login.html",
+        translate("login_title"),
+        error=error,
+    )
 
 
 @router.post("/login")
 def login_action(request: Request, username: str = Form(...), password: str = Form(...)):
+    """Обрабатывает отправку формы авторизации пользователя."""
     user = find_user_by_credentials(username, password)
     if user:
         request.session["user"] = user["username"]
         logger.debug("Пользователь %s успешно вошел в веб-интерфейс.", username)
         return RedirectResponse("/", status_code=303)
     logger.debug("Неудачная попытка входа для пользователя %s.", username)
-    return login_page("Неверный логин или пароль.")
+    return login_page(request, translate("login_error_invalid"))
 
 
 @router.get("/logout")
 def logout_action(request: Request):
+    """Очищает текущую сессию пользователя и перенаправляет на страницу входа."""
     request.session.clear()
     return RedirectResponse("/login", status_code=303)
 
 
 @router.post("/webhook/vector")
 def vector_webhook(payload: Any = Body(...)):
+    """Принимает пакет событий от Vector и помещает его в фоновую очередь."""
     logger.info("Фронтенд принял пакет данных от Vector и передал в очередь бэкграунда.")
     submit_vector_payload(payload)
     return {"status": "accepted"}
@@ -162,10 +167,11 @@ def api_block_bundle(
     program: str = Query(...),
     message: str = Query(...),
 ):
+    """Блокирует связку по прямой ссылке из письма с проверкой API-ключа."""
     valid_user = find_user_by_api_key(key)
     if not valid_user:
         logger.error("Попытка вызова API блокировки с неверным ключом.")
-        raise HTTPException(status_code=403, detail="Неверный или отсутствующий ключ API")
+        raise HTTPException(status_code=403, detail=translate("api_invalid_key"))
 
     request.session["user"] = valid_user["username"]
 
@@ -179,14 +185,6 @@ def api_block_bundle(
     return RedirectResponse(f"/bundle/{bundle_id}?msg=blocked", status_code=303)
 
 
-def _build_select_options(values: List[str], selected_val: str, empty_label: str) -> str:
-    opts = [f'<option value="">{escape(empty_label)}</option>']
-    for v in values:
-        sel = "selected" if v == selected_val else ""
-        opts.append(f'<option value="{escape(v)}" {sel}>{escape(v)}</option>')
-    return "".join(opts)
-
-
 def _build_page_url(
     target_page: int,
     period: str,
@@ -196,6 +194,7 @@ def _build_page_url(
     search_msg: str,
     only_blocked: int,
 ) -> str:
+    """Формирует URL страницы списка связок с сохранением активных фильтров."""
     params: dict[str, Any] = {"period": period, "page": target_page}
     if filter_host:
         params["filter_host"] = filter_host
@@ -209,7 +208,8 @@ def _build_page_url(
         params["only_blocked"] = 1
     return "/?" + urlencode(params)
 
-def _build_pagination_html(
+
+def _build_pagination_context(
     current_page: int,
     total_pages: int,
     period: str,
@@ -218,23 +218,12 @@ def _build_pagination_html(
     filter_container: str,
     search_msg: str,
     only_blocked: int,
-) -> str:
-    if total_pages <= 1:
-        return ""
-
+) -> dict[str, Any]:
+    """Подготавливает структуру данных для рендеринга навигации по страницам."""
     def page_href(p: int) -> str:
-        return escape(
-            _build_page_url(
-                p, period, filter_host, filter_unit, filter_container, search_msg, only_blocked
-            )
+        return _build_page_url(
+            p, period, filter_host, filter_unit, filter_container, search_msg, only_blocked
         )
-
-    parts = ['<nav aria-label="Постраничная навигация">']
-
-    if current_page <= 1:
-        parts.append('<span aria-label="Первая страница" aria-disabled="true">&lt;&lt;</span> ')
-    else:
-        parts.append(f'<a href="{page_href(1)}" aria-label="Первая страница">&lt;&lt;</a> ')
 
     if total_pages <= 7:
         visible_pages: list[Optional[int]] = list(range(1, total_pages + 1))
@@ -254,25 +243,22 @@ def _build_pagination_html(
             visible_pages.append(p)
             prev_p = p
 
-    page_tokens = []
+    tokens = []
     for item in visible_pages:
         if item is None:
-            page_tokens.append("...")
+            tokens.append({"type": "ellipsis"})
         elif item == current_page:
-            page_tokens.append(f'<span aria-current="page"><strong>{item}</strong></span>')
+            tokens.append({"type": "current", "page": item})
         else:
-            page_tokens.append(f'<a href="{page_href(item)}" aria-label="Страница {item}">{item}</a>')
+            tokens.append({"type": "link", "page": item, "url": page_href(item)})
 
-    parts.append(", ".join(page_tokens))
-
-    if current_page >= total_pages:
-        parts.append(' <span aria-label="Последняя страница" aria-disabled="true">&gt;&gt;</span>')
-    else:
-        parts.append(f' <a href="{page_href(total_pages)}" aria-label="Последняя страница">&gt;&gt;</a>')
-
-    parts.append("</nav>")
-    return "".join(parts)
-
+    return {
+        "current_page": current_page,
+        "total_pages": total_pages,
+        "first_url": page_href(1),
+        "last_url": page_href(total_pages),
+        "tokens": tokens,
+    }
 
 @router.get("/", response_class=HTMLResponse)
 def index_page(
@@ -285,14 +271,15 @@ def index_page(
     search_msg: str = Query(""),
     page: int = Query(1, ge=1),
 ):
+    """Отображает главную страницу со списком связок, фильтрами и пагинацией."""
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
 
-    if period not in PERIOD_MAP:
+    if period not in PERIOD_DELTAS:
         period = "1h"
 
-    since_delta = PERIOD_MAP[period][1]
+    since_delta = PERIOD_DELTAS[period]
     clean_host = filter_host.strip()
     clean_unit = filter_unit.strip()
     clean_container = filter_container.strip()
@@ -311,60 +298,19 @@ def index_page(
         page_size=get_page_size(),
     )
 
-    rows = page_result["items"]
     total_count = page_result["total_count"]
     total_pages = page_result["total_pages"]
     current_page = page_result["current_page"]
 
-    period_options = []
-    for k, (label, _) in PERIOD_MAP.items():
-        sel = "selected" if k == period else ""
-        period_options.append(f'<option value="{k}" {sel}>{escape(label)}</option>')
+    formatted_rows = []
+    for r in page_result["items"]:
+        row_dict = dict(r)
+        row_dict["desc_short"] = r["description"] if r["description"] else r["message"][:80]
+        row_dict["last_dt"] = format_local_datetime(r["last_triggered"])
+        formatted_rows.append(row_dict)
 
-    host_options = _build_select_options(filter_opts.get("hosts", []), clean_host, "Все host")
-    unit_options = _build_select_options(filter_opts.get("units", []), clean_unit, "Все unit")
-    container_options = _build_select_options(
-        filter_opts.get("containers", []), clean_container, "Все container"
-    )
-    checked_blocked = "checked" if only_blocked == 1 else ""
-
-    filter_form = f"""
-    <form method="get" action="/" aria-label="Фильтр и поиск связок">
-        <div>
-            <label for="period">Период:</label>
-            <select id="period" name="period">{''.join(period_options)}</select>
-
-            <label for="filter_host">host:</label>
-            <select id="filter_host" name="filter_host">{host_options}</select>
-
-            <label for="filter_unit">unit:</label>
-            <select id="filter_unit" name="filter_unit">{unit_options}</select>
-
-            <label for="filter_container">container:</label>
-            <select id="filter_container" name="filter_container">{container_options}</select>
-        </div>
-        <div>
-            <label for="search_msg">Поиск по message:</label>
-            <input type="text" id="search_msg" name="search_msg" value="{escape(clean_search)}" size="30">
-
-            <input type="checkbox" id="only_blocked" name="only_blocked" value="1" {checked_blocked}>
-            <label for="only_blocked">Только заблокированные</label>
-
-            <button type="submit">Применить</button>
-            <a href="/">Сбросить</a>
-        </div>
-    </form>
-    <hr>
-    """
-
-    if not rows:
-        return render_page(
-            "Список связок",
-            filter_form + "<p>По выбранным условиям записей не найдено.</p>",
-            user,
-        )
-
-    pagination_html = _build_pagination_html(
+    period_options = [(k, translate(f"period_{k}")) for k in PERIOD_DELTAS]
+    pagination = _build_pagination_context(
         current_page=current_page,
         total_pages=total_pages,
         period=period,
@@ -375,91 +321,26 @@ def index_page(
         only_blocked=only_blocked,
     )
 
-    table_rows = []
-    for r in rows:
-        status_text = "Заблокировано" if r["is_blocked"] else "Активно"
-        desc_short = r["description"] if r["description"] else r["message"][:80]
-        last_dt = format_local_datetime(r["last_triggered"])
+    return render_template(
+        request,
+        "index.html",
+        translate("index_title"),
+        user=user,
+        period_options=period_options,
+        period=period,
+        filter_hosts=filter_opts.get("hosts", []),
+        filter_units=filter_opts.get("units", []),
+        filter_containers=filter_opts.get("containers", []),
+        clean_host=clean_host,
+        clean_unit=clean_unit,
+        clean_container=clean_container,
+        clean_search=clean_search,
+        only_blocked=only_blocked,
+        rows=formatted_rows,
+        total_count=total_count,
+        pagination=pagination,
+    )
 
-        table_rows.append(f"""
-        <tr>
-            <td>
-                <input type="checkbox" class="row-chk" id="chk_{r['id']}" name="bundle_ids" value="{r['id']}">
-                <label for="chk_{r['id']}">Выбрать {escape(r['host'])} ({escape(r['service'])}: {escape(r['program'])})</label>
-            </td>
-            <th scope="row"><a href="/bundle/{r['id']}">{escape(r['host'])}</a></th>
-            <td>{escape(r['service'])}</td>
-            <td>{escape(r['program'])}</td>
-            <td>{escape(desc_short)}</td>
-            <td>{escape(last_dt)} (сработок: {r['trigger_count']})</td>
-            <td>{status_text}</td>
-        </tr>
-        """)
-
-    action_buttons_html = """
-        <div>
-            <button type="submit" name="action" value="block">Заблокировать выбранные</button>
-            <button type="submit" name="action" value="unblock">Разблокировать выбранные</button>
-            <button type="submit" name="action" value="delete">Удалить выбранные из базы</button>
-        </div>
-    """
-
-    state_inputs_html = f"""
-        <input type="hidden" name="period" value="{escape(period)}">
-        <input type="hidden" name="filter_host" value="{escape(clean_host)}">
-        <input type="hidden" name="filter_unit" value="{escape(clean_unit)}">
-        <input type="hidden" name="filter_container" value="{escape(clean_container)}">
-        <input type="hidden" name="search_msg" value="{escape(clean_search)}">
-        <input type="hidden" name="only_blocked" value="{1 if only_blocked == 1 else 0}">
-        <input type="hidden" name="page" value="{current_page}">
-    """
-
-    bulk_form = f"""
-    {pagination_html}
-    <form method="post" action="/bulk-action">
-        {state_inputs_html}
-        {action_buttons_html}
-        <h2>Найденные связки событий ({total_count})</h2>
-        <table border="1">
-            <thead>
-                <tr>
-                    <th scope="col">
-                        <input type="checkbox" id="select_all">
-                        <label for="select_all">Выбрать все</label>
-                    </th>
-                    <th scope="col">host</th>
-                    <th scope="col">Тип (container / unit)</th>
-                    <th scope="col">Программа</th>
-                    <th scope="col">Описание</th>
-                    <th scope="col">Последняя сработка</th>
-                    <th scope="col">Статус</th>
-                </tr>
-            </thead>
-            <tbody>
-                {''.join(table_rows)}
-            </tbody>
-        </table><br>
-        {action_buttons_html}
-    </form>
-    {pagination_html}
-    <script>
-        (function() {{
-            const selectAll = document.getElementById('select_all');
-            const rowChks = document.querySelectorAll('.row-chk');
-            if (!selectAll) return;
-            selectAll.addEventListener('change', function() {{
-                rowChks.forEach(function(cb) {{ cb.checked = selectAll.checked; }});
-            }});
-            rowChks.forEach(function(cb) {{
-                cb.addEventListener('change', function() {{
-                    const allChecked = Array.from(rowChks).every(function(c) {{ return c.checked; }});
-                    selectAll.checked = allChecked;
-                }});
-            }});
-        }})();
-    </script>
-    """
-    return render_page("Список связок", filter_form + bulk_form, user)
 
 @router.post("/bulk-action")
 def bulk_action(
@@ -474,6 +355,7 @@ def bulk_action(
     only_blocked: int = Form(default=0),
     page: int = Form(default=1),
 ):
+    """Выполняет массовую блокировку, разблокировку или удаление выбранных связок."""
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
@@ -481,7 +363,7 @@ def bulk_action(
     if action in ("block", "unblock", "delete"):
         submit_ui_task("bulk_action", bulk_type=action, bundle_ids=bundle_ids)
 
-    safe_period = period if period in PERIOD_MAP else "1h"
+    safe_period = period if period in PERIOD_DELTAS else "1h"
     safe_page = max(1, page)
     redirect_url = _build_page_url(
         target_page=safe_page,
@@ -497,46 +379,17 @@ def bulk_action(
 
 @router.get("/bundle/new", response_class=HTMLResponse)
 def new_bundle_page(request: Request):
+    """Отображает форму ручного создания новой связки."""
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
 
-    html = """
-    <p>Для поиска по части строки заключите текст message в двойные фигурные скобки, например: <code>{{Connection refused}}</code>.</p>
-    <form method="post" action="/bundle/new">
-        <div>
-            <label for="host">host:</label><br>
-            <input type="text" id="host" name="host" required size="50">
-        </div><br>
-        <div>
-            <label for="service">Тип сервиса (container / unit):</label><br>
-            <select id="service" name="service">
-                <option value="container">container</option>
-                <option value="unit">unit</option>
-                <option value="unknown">unknown</option>
-            </select>
-        </div><br>
-        <div>
-            <label for="program">Имя container или unit:</label><br>
-            <input type="text" id="program" name="program" required size="50">
-        </div><br>
-        <div>
-            <label for="message">message (или {{часть строки}}):</label><br>
-            <textarea id="message" name="message" rows="3" cols="60" required></textarea>
-        </div><br>
-        <div>
-            <label for="description">Описание:</label><br>
-            <textarea id="description" name="description" rows="3" cols="60"></textarea>
-        </div><br>
-        <div>
-            <input type="checkbox" id="is_blocked" name="is_blocked" value="1" checked>
-            <label for="is_blocked">Сразу заблокировать эту связку</label>
-        </div><br>
-        <button type="submit">Создать связку</button>
-    </form>
-    """
-    return render_page("Создание новой связки вручную", html, user)
-
+    return render_template(
+        request,
+        "bundle_new.html",
+        translate("new_bundle_title"),
+        user=user,
+    )
 
 @router.post("/bundle/new")
 def create_bundle_action(
@@ -548,6 +401,7 @@ def create_bundle_action(
     description: str = Form(default=""),
     is_blocked: int = Form(default=0),
 ):
+    """Создает новую связку в базе данных по данным из веб-формы."""
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
@@ -563,91 +417,29 @@ def create_bundle_action(
     )
     return RedirectResponse(f"/bundle/{bundle_id}?msg=saved", status_code=303)
 
+
 @router.get("/bundle/{bundle_id}", response_class=HTMLResponse)
 def bundle_detail(request: Request, bundle_id: int, msg: str = ""):
+    """Отображает страницу просмотра и редактирования конкретной связки."""
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
 
     row = submit_ui_task("fetch_bundle_by_id", bundle_id=bundle_id)
     if not row:
-        raise HTTPException(status_code=404, detail="Связка не найдена")
+        raise HTTPException(status_code=404, detail=translate("detail_not_found"))
 
-    alert_banner = ""
-    if msg == "blocked":
-        alert_banner = '<p role="alert"><strong>Статус обновлен:</strong> Связка заблокирована. Уведомления по ней приходить не будут.</p>'
-    elif msg == "saved":
-        alert_banner = '<p role="alert"><strong>Сохранено:</strong> Изменения применены.</p>'
-
-    status_text = (
-        "Заблокирована (уведомления отключены)"
-        if row["is_blocked"]
-        else "Активна (уведомления отправляются)"
+    return render_template(
+        request,
+        "bundle_detail.html",
+        translate("detail_title", id=bundle_id, host=row["host"]),
+        user=user,
+        bundle=row,
+        msg=msg,
+        is_substring=is_substring_pattern(row["message"]),
+        last_triggered_formatted=format_local_datetime(row["last_triggered"]),
+        retention_days=get_retention_days(),
     )
-    match_mode = (
-        "По вхождению подстроки ({{...}})"
-        if is_substring_pattern(row["message"])
-        else "Полное совпадение очищенной строки"
-    )
-
-    sel_container = "selected" if row["service"] == "container" else ""
-    sel_unit = "selected" if row["service"] == "unit" else ""
-    sel_unknown = "selected" if row["service"] not in ("container", "unit") else ""
-    chk_blocked = "checked" if row["is_blocked"] else ""
-
-    html = f"""
-    {alert_banner}
-    <dl>
-        <dt><strong>Режим сравнения message:</strong></dt>
-        <dd>{match_mode}</dd>
-
-        <dt><strong>Последняя сработка:</strong></dt>
-        <dd>{escape(format_local_datetime(row['last_triggered']))}</dd>
-
-        <dt><strong>Количество срабатываний за период хранения ({get_retention_days()} дн.):</strong></dt>
-        <dd>{row['trigger_count']}</dd>
-
-        <dt><strong>Текущий статус:</strong></dt>
-        <dd>{status_text}</dd>
-    </dl>
-
-    <hr>
-    <h2>Полное редактирование связки</h2>
-    <p>Подсказка: чтобы проверять только наличие части текста в логе, оберните ее в двойные фигурные скобки: <code>{{часть текста}}</code>.</p>
-    <form method="post" action="/bundle/{bundle_id}/update">
-        <div>
-            <label for="host">host:</label><br>
-            <input type="text" id="host" name="host" value="{escape(row['host'])}" required size="50">
-        </div><br>
-        <div>
-            <label for="service">Тип сервиса (container / unit):</label><br>
-            <select id="service" name="service">
-                <option value="container" {sel_container}>container</option>
-                <option value="unit" {sel_unit}>unit</option>
-                <option value="unknown" {sel_unknown}>unknown</option>
-            </select>
-        </div><br>
-        <div>
-            <label for="program">Имя container или unit:</label><br>
-            <input type="text" id="program" name="program" value="{escape(row['program'])}" required size="50">
-        </div><br>
-        <div>
-            <label for="message">message (для сравнения связки):</label><br>
-            <textarea id="message" name="message" rows="3" cols="60" required>{escape(row['message'])}</textarea>
-        </div><br>
-        <div>
-            <label for="description">Описание (для отображения):</label><br>
-            <textarea id="description" name="description" rows="4" cols="60">{escape(row['description'])}</textarea>
-        </div><br>
-        <div>
-            <input type="checkbox" id="is_blocked" name="is_blocked" value="1" {chk_blocked}>
-            <label for="is_blocked">Заблокировать уведомления по этой связке</label>
-        </div><br>
-        <button type="submit" name="action" value="save_all">Сохранить все изменения</button>
-        <button type="submit" name="action" value="delete">Полностью удалить связку из базы</button>
-    </form>
-    """
-    return render_page(f"Связка #{bundle_id}: {row['host']}", html, user)
 
 
 @router.post("/bundle/{bundle_id}/update")
@@ -662,6 +454,7 @@ def bundle_update(
     description: str = Form(default=""),
     is_blocked: int = Form(default=0),
 ):
+    """Сохраняет изменения связки или удаляет ее из базы данных."""
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
@@ -685,154 +478,28 @@ def bundle_update(
 
     return RedirectResponse(f"/bundle/{bundle_id}", status_code=303)
 
-def _render_settings_form(
-    user: dict,
-    cfg: dict,
-    banner_html: str = "",
-) -> HTMLResponse:
-    sel_debug = "selected" if cfg["log_level"] == "DEBUG" else ""
-    sel_info = "selected" if cfg["log_level"] == "INFO" else ""
-    sel_error = "selected" if cfg["log_level"] == "ERROR" else ""
-
-    sel_disk = "selected" if cfg["db_backend"] == "sqlite_disk" else ""
-    sel_mem = "selected" if cfg["db_backend"] == "sqlite_memory" else ""
-
-    chk_ssl = "checked" if cfg["smtp_use_ssl"] else ""
-    chk_starttls = "checked" if cfg["smtp_use_starttls"] else ""
-    chk_verify = "checked" if cfg["smtp_verify_ssl"] else ""
-
-    html = f"""
-    {banner_html}
-    <form method="post" action="/settings">
-        <fieldset>
-            <legend>Веб-сервер и логирование</legend>
-            <div>
-                <label for="listen_host">IP-адрес сервера:</label><br>
-                <input type="text" id="listen_host" name="listen_host" value="{escape(str(cfg['listen_host']))}" required size="30" aria-describedby="desc_listen_host">
-                <p id="desc_listen_host"><small>Сетевой адрес, на котором веб-интерфейс принимает подключения (0.0.0.0 — все интерфейсы). Применяется после перезапуска службы.</small></p>
-            </div>
-            <div>
-                <label for="listen_port">Порт сервера:</label><br>
-                <input type="number" id="listen_port" name="listen_port" value="{int(cfg['listen_port'])}" min="1" max="65535" required aria-describedby="desc_listen_port">
-                <p id="desc_listen_port"><small>TCP-порт для доступа к веб-интерфейсу и приема событий от Vector. Применяется после перезапуска службы.</small></p>
-            </div>
-            <div>
-                <label for="base_url">Внешний адрес (URL):</label><br>
-                <input type="text" id="base_url" name="base_url" value="{escape(str(cfg['base_url']))}" size="50" aria-describedby="desc_base_url">
-                <p id="desc_base_url"><small>Базовый адрес приложения для формирования ссылок быстрой блокировки в письмах (например, http://nas.lan:8080).</small></p>
-            </div>
-            <div>
-                <label for="log_level">Уровень логирования:</label><br>
-                <select id="log_level" name="log_level" aria-describedby="desc_log_level">
-                    <option value="INFO" {sel_info}>INFO (обычный)</option>
-                    <option value="DEBUG" {sel_debug}>DEBUG (подробный)</option>
-                    <option value="ERROR" {sel_error}>ERROR (только ошибки)</option>
-                </select>
-                <p id="desc_log_level"><small>Подробность системного журнала приложения при запуске службы.</small></p>
-            </div>
-        </fieldset><br>
-
-        <fieldset>
-            <legend>База данных и интерфейс</legend>
-            <div>
-                <label for="db_backend">Режим хранения базы:</label><br>
-                <select id="db_backend" name="db_backend" aria-describedby="desc_db_backend">
-                    <option value="sqlite_memory" {sel_mem}>В оперативной памяти (sqlite_memory)</option>
-                    <option value="sqlite_disk" {sel_disk}>На диске (sqlite_disk)</option>
-                </select>
-                <p id="desc_db_backend"><small>Режим работы SQLite: в памяти снижает обращения к дискам NAS, на диске сохраняет каждое событие сразу. Применяется после перезапуска службы.</small></p>
-            </div>
-            <div>
-                <label for="memory_flush_seconds">Интервал сброса на диск (сек.):</label><br>
-                <input type="number" id="memory_flush_seconds" name="memory_flush_seconds" value="{int(cfg['memory_flush_seconds'])}" min="10" required aria-describedby="desc_memory_flush">
-                <p id="desc_memory_flush"><small>Как часто сохранять базу из оперативной памяти на диск в режиме sqlite_memory (если были изменения).</small></p>
-            </div>
-            <div>
-                <label for="retention_days">Срок хранения истории (дней):</label><br>
-                <input type="number" id="retention_days" name="retention_days" value="{int(cfg['retention_days'])}" min="1" required aria-describedby="desc_retention_days">
-                <p id="desc_retention_days"><small>Количество дней, в течение которых хранятся записи сработок и неактивные связки до автоматического удаления.</small></p>
-            </div>
-            <div>
-                <label for="page_size">Связок на странице:</label><br>
-                <input type="number" id="page_size" name="page_size" value="{int(cfg['page_size'])}" min="1" max="1000" required aria-describedby="desc_page_size">
-                <p id="desc_page_size"><small>Максимальное количество связок, выводимых на одной странице списка на главной странице.</small></p>
-            </div>
-        </fieldset><br>
-
-        <fieldset>
-            <legend>Почта и уведомления (SMTP)</legend>
-            <div>
-                <label for="batch_delay_seconds">Задержка группировки писем (сек.):</label><br>
-                <input type="number" id="batch_delay_seconds" name="batch_delay_seconds" value="{float(cfg['batch_delay_seconds'])}" min="0" step="1" required aria-describedby="desc_batch_delay">
-                <p id="desc_batch_delay"><small>Время ожидания перед отправкой письма для объединения нескольких сбоев одного хоста в одну сводку (0 — отправлять сразу).</small></p>
-            </div>
-            <div>
-                <label for="smtp_host">SMTP-сервер:</label><br>
-                <input type="text" id="smtp_host" name="smtp_host" value="{escape(str(cfg['smtp_host']))}" required size="40" aria-describedby="desc_smtp_host">
-                <p id="desc_smtp_host"><small>Адрес почтового сервера для отправки писем с уведомлениями.</small></p>
-            </div>
-            <div>
-                <label for="smtp_port">SMTP-порт:</label><br>
-                <input type="number" id="smtp_port" name="smtp_port" value="{int(cfg['smtp_port'])}" min="1" max="65535" required aria-describedby="desc_smtp_port">
-                <p id="desc_smtp_port"><small>Порт почтового сервера (обычно 465 для SSL или 587 для STARTTLS).</small></p>
-            </div>
-            <div>
-                <input type="checkbox" id="smtp_use_ssl" name="smtp_use_ssl" value="1" {chk_ssl} aria-describedby="desc_smtp_ssl">
-                <label for="smtp_use_ssl">Использовать SSL</label>
-                <p id="desc_smtp_ssl"><small>Шифрованное соединение с почтовым сервером с момента подключения (порт 465).</small></p>
-            </div>
-            <div>
-                <input type="checkbox" id="smtp_use_starttls" name="smtp_use_starttls" value="1" {chk_starttls} aria-describedby="desc_smtp_starttls">
-                <label for="smtp_use_starttls">Использовать STARTTLS</label>
-                <p id="desc_smtp_starttls"><small>Переход на защищенное соединение после установки обычного подключения (обычно порт 587).</small></p>
-            </div>
-            <div>
-                <input type="checkbox" id="smtp_verify_ssl" name="smtp_verify_ssl" value="1" {chk_verify} aria-describedby="desc_smtp_verify">
-                <label for="smtp_verify_ssl">Проверять SSL-сертификат</label>
-                <p id="desc_smtp_verify"><small>Проверка подлинности сертификата почтового сервера (отключите для самоподписанных сертификатов локального NAS).</small></p>
-            </div>
-            <div>
-                <label for="smtp_user">Логин SMTP:</label><br>
-                <input type="text" id="smtp_user" name="smtp_user" value="{escape(str(cfg['smtp_user']))}" size="40" autocomplete="off" aria-describedby="desc_smtp_user">
-                <p id="desc_smtp_user"><small>Имя учетной записи для авторизации на почтовом сервере (оставьте пустым, если авторизация не требуется).</small></p>
-            </div>
-            <div>
-                <label for="smtp_password">Новый пароль SMTP:</label><br>
-                <input type="password" id="smtp_password" name="smtp_password" value="" size="40" autocomplete="new-password" aria-describedby="desc_smtp_password">
-                <p id="desc_smtp_password"><small>Оставьте поле пустым, чтобы сохранить текущий пароль от почтового ящика без изменений.</small></p>
-            </div>
-            <div>
-                <label for="smtp_from_addr">Адрес отправителя:</label><br>
-                <input type="email" id="smtp_from_addr" name="smtp_from_addr" value="{escape(str(cfg['smtp_from_addr']))}" required size="40" aria-describedby="desc_smtp_from">
-                <p id="desc_smtp_from"><small>Email-адрес, который будет указан в поле «От кого» в отправляемых уведомлениях.</small></p>
-            </div>
-            <div>
-                <label for="smtp_to_addrs">Адреса получателей:</label><br>
-                <input type="text" id="smtp_to_addrs" name="smtp_to_addrs" value="{escape(str(cfg['smtp_to_addrs']))}" required size="50" aria-describedby="desc_smtp_to">
-                <p id="desc_smtp_to"><small>Один или несколько email-адресов получателей уведомлений, перечисленных через запятую.</small></p>
-            </div>
-        </fieldset><br>
-
-        <button type="submit">Сохранить настройки</button>
-    </form>
-    """
-    return render_page("Настройки приложения", html, user)
 
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, msg: str = ""):
+    """Отображает страницу настроек приложения."""
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
 
-    banner = ""
-    if msg == "saved":
-        banner = '<p role="alert"><strong>Сохранено:</strong> Настройки успешно записаны в файл конфигурации.</p>'
-
-    return _render_settings_form(user, get_editable_settings(), banner)
-
+    return render_template(
+        request,
+        "settings.html",
+        translate("settings_title"),
+        user=user,
+        cfg=get_editable_settings(),
+        available_languages=get_available_languages(),
+        msg=msg,
+        error_message="",
+    )
 
 @router.post("/settings", response_class=HTMLResponse)
 async def settings_save(request: Request):
+    """Проверяет и сохраняет обновленные настройки приложения из веб-формы."""
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
@@ -847,65 +514,107 @@ async def settings_save(request: Request):
         )
         raise HTTPException(
             status_code=400,
-            detail="Запрос отклонен: переданы запрещенные или недопустимые параметры конфигурации.",
+            detail=translate("err_disallowed_fields"),
         )
 
+    available_langs = get_available_languages()
+
     try:
+        language = str(form_data.get("language", "ru")).strip().lower()
+        if language not in available_langs:
+            language = "ru"
+
         listen_host = str(form_data.get("listen_host", "")).strip()
         if not listen_host:
-            raise ValueError("IP-адрес сервера не может быть пустым.")
+            raise ValueError(translate("err_empty_listen_host"))
 
         listen_port = int(str(form_data.get("listen_port", "")).strip())
         if not (1 <= listen_port <= 65535):
-            raise ValueError("Порт сервера должен быть в диапазоне от 1 до 65535.")
+            raise ValueError(translate("err_invalid_listen_port"))
 
         log_level = str(form_data.get("log_level", "INFO")).strip().upper()
         if log_level not in ("DEBUG", "INFO", "ERROR"):
-            raise ValueError("Недопустимый уровень логирования.")
+            raise ValueError(translate("err_invalid_log_level"))
+
+        https_enabled = "https_enabled" in form_data
+        ssl_certfile = str(form_data.get("ssl_certfile", "")).strip()
+        ssl_keyfile = str(form_data.get("ssl_keyfile", "")).strip()
+
+        if https_enabled:
+            if not ssl_certfile or not ssl_keyfile:
+                raise ValueError(translate("err_https_missing_files"))
+            try:
+                cert_path = resolve_data_file(ssl_certfile)
+            except ValueError:
+                raise ValueError(translate("err_https_invalid_filename", filename=ssl_certfile))
+            try:
+                key_path = resolve_data_file(ssl_keyfile)
+            except ValueError:
+                raise ValueError(translate("err_https_invalid_filename", filename=ssl_keyfile))
+
+            if not cert_path.is_file():
+                raise ValueError(translate("err_https_cert_not_found", filename=ssl_certfile))
+            if not key_path.is_file():
+                raise ValueError(translate("err_https_key_not_found", filename=ssl_keyfile))
+        else:
+            if ssl_certfile:
+                try:
+                    resolve_data_file(ssl_certfile)
+                except ValueError:
+                    raise ValueError(translate("err_https_invalid_filename", filename=ssl_certfile))
+            if ssl_keyfile:
+                try:
+                    resolve_data_file(ssl_keyfile)
+                except ValueError:
+                    raise ValueError(translate("err_https_invalid_filename", filename=ssl_keyfile))
 
         db_backend = str(form_data.get("db_backend", "sqlite_disk")).strip().lower()
         if db_backend not in ("sqlite_disk", "sqlite_memory"):
-            raise ValueError("Недопустимый режим хранения базы данных.")
+            raise ValueError(translate("err_invalid_db_backend"))
 
         memory_flush_seconds = int(str(form_data.get("memory_flush_seconds", "")).strip())
         if memory_flush_seconds < 10:
-            raise ValueError("Интервал сброса на диск должен быть не менее 10 секунд.")
+            raise ValueError(translate("err_invalid_memory_flush"))
 
         retention_days = int(str(form_data.get("retention_days", "")).strip())
         if retention_days < 1:
-            raise ValueError("Срок хранения истории должен быть не менее 1 дня.")
+            raise ValueError(translate("err_invalid_retention"))
 
         batch_delay_seconds = float(str(form_data.get("batch_delay_seconds", "")).strip())
         if batch_delay_seconds < 0:
-            raise ValueError("Задержка группировки писем не может быть отрицательной.")
+            raise ValueError(translate("err_invalid_batch_delay"))
 
         page_size = int(str(form_data.get("page_size", "")).strip())
         if page_size < 1:
-            raise ValueError("Количество связок на странице должно быть не менее 1.")
+            raise ValueError(translate("err_invalid_page_size"))
 
         base_url = str(form_data.get("base_url", "")).strip().rstrip("/")
 
         smtp_host = str(form_data.get("smtp_host", "")).strip()
         if not smtp_host:
-            raise ValueError("Адрес SMTP-сервера не может быть пустым.")
+            raise ValueError(translate("err_empty_smtp_host"))
 
         smtp_port = int(str(form_data.get("smtp_port", "")).strip())
         if not (1 <= smtp_port <= 65535):
-            raise ValueError("Порт SMTP-сервера должен быть в диапазоне от 1 до 65535.")
+            raise ValueError(translate("err_invalid_smtp_port"))
 
         smtp_from_addr = str(form_data.get("smtp_from_addr", "")).strip()
         if not smtp_from_addr:
-            raise ValueError("Адрес отправителя SMTP не может быть пустым.")
+            raise ValueError(translate("err_empty_smtp_from"))
 
         raw_to_addrs = str(form_data.get("smtp_to_addrs", "")).strip()
         to_addrs_list = [addr.strip() for addr in raw_to_addrs.split(",") if addr.strip()]
         if not to_addrs_list:
-            raise ValueError("Укажите хотя бы один адрес получателя уведомлений.")
+            raise ValueError(translate("err_empty_smtp_to"))
 
         validated_payload = {
+            "language": language,
             "listen_host": listen_host,
             "listen_port": listen_port,
             "log_level": log_level,
+            "https_enabled": https_enabled,
+            "ssl_certfile": ssl_certfile,
+            "ssl_keyfile": ssl_keyfile,
             "db_backend": db_backend,
             "memory_flush_seconds": memory_flush_seconds,
             "retention_days": retention_days,
@@ -927,7 +636,15 @@ async def settings_save(request: Request):
         update_allowed_settings(validated_payload)
     except ValueError as err:
         logger.warning("Ошибка валидации при сохранении настроек: %s", err)
-        err_banner = f'<p role="alert"><strong>Ошибка:</strong> {escape(str(err))}</p>'
-        return _render_settings_form(user, get_editable_settings(), err_banner)
+        return render_template(
+            request,
+            "settings.html",
+            translate("settings_title"),
+            user=user,
+            cfg=get_editable_settings(),
+            available_languages=available_langs,
+            msg="",
+            error_message=str(err),
+        )
 
     return RedirectResponse("/settings?msg=saved", status_code=303)

@@ -1,3 +1,9 @@
+"""Фоновый рабочий поток обработки событий Vector и запросов веб-интерфейса.
+
+Обеспечивает потокобезопасную последовательную работу с базой данных через
+очередь задач `bg_queue` и передачу уведомлений в очередь почтовика `mail_queue`.
+"""
+
 import logging
 import queue
 import threading
@@ -16,7 +22,8 @@ mail_queue: queue.Queue = queue.Queue()
 _bg_thread: Optional[threading.Thread] = None
 
 
-def submit_vector_payload(payload: Any):
+def submit_vector_payload(payload: Any) -> None:
+    """Помещает входящий пакет данных от Vector в очередь фоновой обработки."""
     try:
         bg_queue.put({"source": "vector", "payload": payload})
     except queue.ShutDown:
@@ -24,6 +31,7 @@ def submit_vector_payload(payload: Any):
 
 
 def submit_ui_task(action: str, **kwargs) -> Any:
+    """Синхронно отправляет задачу веб-интерфейса в фоновый поток БД и ждет ответ."""
     reply_q: queue.Queue = queue.Queue(maxsize=1)
     try:
         bg_queue.put({
@@ -41,7 +49,8 @@ def submit_ui_task(action: str, **kwargs) -> Any:
     return result
 
 
-def _handle_vector_batch(payload: Any):
+def _handle_vector_batch(payload: Any) -> None:
+    """Разбирает пакет событий от Vector, записывает в БД и передает новые в почтовик."""
     if isinstance(payload, list):
         events = payload
     elif isinstance(payload, dict):
@@ -71,8 +80,8 @@ def _handle_vector_batch(payload: Any):
     else:
         logger.info("Уведомление на почту не отправлено: все события из пакета заблокированы.")
 
-
 def _handle_ui_task(action: str, params: dict) -> Any:
+    """Выполняет синхронный запрос веб-интерфейса к базе данных в фоновом потоке."""
     if action == "fetch_bundles":
         return db.fetch_bundles(
             only_blocked=params["only_blocked"],
@@ -147,7 +156,8 @@ def _handle_ui_task(action: str, params: dict) -> Any:
     raise ValueError(f"Неизвестное действие UI: {action}")
 
 
-def _bg_worker_loop():
+def _bg_worker_loop() -> None:
+    """Основной цикл фонового потока обработки задач и периодического сброса БД на диск."""
     logger.debug("Поток бэкграунда запущен.")
     last_flush = time.monotonic()
 
@@ -190,14 +200,16 @@ def _bg_worker_loop():
         db.close()
 
 
-def start_background_worker():
+def start_background_worker() -> None:
+    """Инициализирует базу данных и запускает фоновый рабочий поток."""
     global _bg_thread
     db.init()
     _bg_thread = threading.Thread(target=_bg_worker_loop, name="BackgroundWorker", daemon=False)
     _bg_thread.start()
 
 
-def stop_background_worker():
+def stop_background_worker() -> None:
+    """Корректно закрывает очередь бэкграунда и ожидает завершения рабочего потока."""
     logger.info("Закрытие очереди бэкграунда и ожидание завершения его потока...")
     bg_queue.shutdown(immediate=False)
     if _bg_thread and _bg_thread.is_alive():

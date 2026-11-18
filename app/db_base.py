@@ -1,3 +1,5 @@
+"""Базовый абстрактный класс хранилища алертов и SQL-логика работы со связками."""
+
 import logging
 import sqlite3
 from abc import ABC, abstractmethod
@@ -11,27 +13,35 @@ logger = logging.getLogger("alert_filter.db_base")
 
 
 class BaseAlertDatabase(ABC):
+    """Абстрактный базовый класс для реализаций хранилища связок и событий SQLite."""
+
     @abstractmethod
-    def init(self):
+    def init(self) -> None:
+        """Инициализирует подключение к базе данных и схему таблиц."""
         pass
 
     @abstractmethod
-    def flush_to_disk(self, force: bool = False):
+    def flush_to_disk(self, force: bool = False) -> None:
+        """Принудительно или по расписанию сохраняет данные на диск."""
         pass
 
     @abstractmethod
-    def close(self):
+    def close(self) -> None:
+        """Корректно закрывает соединение с базой данных."""
         pass
 
     @abstractmethod
     def _execute_read(self, callback):
+        """Выполняет функцию чтения `callback(conn)` в безопасном контексте."""
         pass
 
     @abstractmethod
     def _execute_write(self, callback):
+        """Выполняет функцию записи `callback(conn)` в безопасном контексте."""
         pass
 
-    def _create_schema(self, conn: sqlite3.Connection):
+    def _create_schema(self, conn: sqlite3.Connection) -> None:
+        """Создает таблицы `bundles`, `events` и индексы, если они не существуют."""
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS bundles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,6 +67,7 @@ class BaseAlertDatabase(ABC):
         """)
 
     def _cleanup_old_records(self, conn: sqlite3.Connection) -> bool:
+        """Удаляет устаревшие события и неактивные связки старше `retention_days`."""
         days = get_retention_days()
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
@@ -73,6 +84,7 @@ class BaseAlertDatabase(ABC):
     def _find_matching_bundle(
         self, conn: sqlite3.Connection, host: str, service: str, program: str, message: str
     ):
+        """Ищет существующую связку по точному хешу или по шаблону подстроки `{{...}}`."""
         b_hash = make_bundle_hash(host, service, program, message)
         exact = conn.execute(
             "SELECT * FROM bundles WHERE bundle_hash = ?", (b_hash,)
@@ -98,6 +110,7 @@ class BaseAlertDatabase(ABC):
         return None
 
     def process_incoming_event(self, clean_data: dict) -> Optional[dict]:
+        """Регистрирует входящее событие и возвращает данные для отправки, если связка не заблокирована."""
         now_iso = datetime.now(timezone.utc).isoformat()
 
         def _op(conn: sqlite3.Connection):
@@ -178,6 +191,7 @@ class BaseAlertDatabase(ABC):
         description: str,
         is_blocked: bool,
     ) -> int:
+        """Создает новую связку вручную через веб-интерфейс и возвращает ее ID."""
         b_hash = make_bundle_hash(host, service, program, message)
         now_iso = datetime.now(timezone.utc).isoformat()
         blocked_val = 1 if is_blocked else 0
@@ -204,7 +218,8 @@ class BaseAlertDatabase(ABC):
         message: str,
         description: str,
         is_blocked: bool,
-    ):
+    ) -> None:
+        """Полностью обновляет поля существующей связки по ее ID."""
         b_hash = make_bundle_hash(host, service, program, message)
         blocked_val = 1 if is_blocked else 0
 
@@ -224,6 +239,7 @@ class BaseAlertDatabase(ABC):
     def get_or_create_and_block_bundle(
         self, host: str, service: str, program: str, message: str
     ) -> int:
+        """Находит связку (или создает новую) и переводит ее в статус заблокированной."""
         now_iso = datetime.now(timezone.utc).isoformat()
 
         def _op(conn: sqlite3.Connection):
@@ -246,6 +262,7 @@ class BaseAlertDatabase(ABC):
         return self._execute_write(_op)
 
     def fetch_filter_options(self) -> dict:
+        """Возвращает списки уникальных хостов, unit и container для выпадающих фильтров."""
         def _op(conn: sqlite3.Connection):
             hosts = [
                 r["host"]
@@ -278,6 +295,7 @@ class BaseAlertDatabase(ABC):
         page: int = 1,
         page_size: int = 25,
     ) -> dict:
+        """Выполняет фильтрацию, подсчет сработок и постраничную выборку связок."""
         where_clauses = ["1=1"]
         params = []
 
@@ -344,6 +362,7 @@ class BaseAlertDatabase(ABC):
         return self._execute_read(_op)
 
     def fetch_bundle_by_id(self, bundle_id: int) -> Optional[dict]:
+        """Возвращает подробную информацию о связке по ID вместе со счетчиком сработок."""
         def _op(conn: sqlite3.Connection):
             self._cleanup_old_records(conn)
             row = conn.execute(
@@ -360,7 +379,8 @@ class BaseAlertDatabase(ABC):
 
         return self._execute_read(_op)
 
-    def set_bundles_block_status(self, bundle_ids: List[int], is_blocked: bool):
+    def set_bundles_block_status(self, bundle_ids: List[int], is_blocked: bool) -> None:
+        """Массово устанавливает флаг блокировки для списка ID связок."""
         if not bundle_ids:
             return
         placeholders = ",".join("?" for _ in bundle_ids)
@@ -375,7 +395,8 @@ class BaseAlertDatabase(ABC):
 
         self._execute_write(_op)
 
-    def delete_bundles(self, bundle_ids: List[int]):
+    def delete_bundles(self, bundle_ids: List[int]) -> None:
+        """Массово удаляет связки (и связанные события по CASCADE) по списку ID."""
         if not bundle_ids:
             return
         placeholders = ",".join("?" for _ in bundle_ids)

@@ -1,0 +1,7 @@
+{% for group in groups %}host: {{ host }} | {{ group.service }}: {{ group.program }}
+  - {{ t('mail_message_label') }} {{ group.first_item.message }}
+    {{ group.first_item.link_label }}: {{ group.first_item.block_url }}
+{% for extra in group.extra_items %}  - {{ t('mail_message_label') }} {{ extra.message }}
+    {{ extra.link_label }}: {{ extra.block_url }}
+{% endfor %}---
+{% endfor %}© VAF {{ current_year }}

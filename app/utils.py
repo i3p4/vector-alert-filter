@@ -1,3 +1,5 @@
+"""Вспомогательные утилиты очистки логов, хеширования связок и форматирования дат."""
+
 import hashlib
 import logging
 import re
@@ -22,6 +24,7 @@ DATETIME_PATTERNS = [
 
 
 def decolorize(text: str) -> str:
+    """Удаляет ANSI escape-последовательности расцветки терминала из строки."""
     if not text:
         return ""
     cleaned = ANSI_ESCAPE_RE.sub("", str(text))
@@ -30,6 +33,7 @@ def decolorize(text: str) -> str:
 
 
 def strip_datetime(text: str) -> str:
+    """Вырезает метки даты, времени и Unix-timestamp из текста сообщения."""
     if not text:
         return ""
     cleaned = str(text)
@@ -41,6 +45,7 @@ def strip_datetime(text: str) -> str:
 
 
 def clean_text_pipeline(raw_text: str) -> str:
+    """Последовательно очищает строку от ANSI-кодов и временных меток."""
     logger.debug("Исходная строка до очистки: %r", raw_text)
     no_color = decolorize(raw_text)
     no_dt = strip_datetime(no_color)
@@ -48,11 +53,13 @@ def clean_text_pipeline(raw_text: str) -> str:
 
 
 def make_bundle_hash(host: str, service: str, program: str, message: str) -> str:
+    """Вычисляет SHA-256 хеш связки (host, service, program, message) в нижнем регистре."""
     raw = f"{host.lower()}|{service.lower()}|{program.lower()}|{message.lower()}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def is_substring_pattern(pattern_msg: str) -> bool:
+    """Проверяет, оформлено ли сообщение как шаблон поиска по подстроке `{{...}}`."""
     return (
         len(pattern_msg) > 4
         and pattern_msg.startswith("{{")
@@ -61,6 +68,7 @@ def is_substring_pattern(pattern_msg: str) -> bool:
 
 
 def match_message(stored_msg: str, incoming_msg: str) -> bool:
+    """Сравнивает сохраненный шаблон сообщения с входящим очищенным текстом."""
     if is_substring_pattern(stored_msg):
         sub = stored_msg[2:-2].strip()
         matched = sub.lower() in incoming_msg.lower()
@@ -75,6 +83,7 @@ def match_message(stored_msg: str, incoming_msg: str) -> bool:
 
 
 def extract_clean_vector_event(event: dict) -> dict:
+    """Нормализует сырое событие из Vector и вычисляет хеш связки."""
     logger.debug("Разбор события из Vector: %s", event)
 
     raw_host = str(event.get("host") or "unknown-host")
@@ -111,6 +120,7 @@ def extract_clean_vector_event(event: dict) -> dict:
 
 
 def format_local_datetime(iso_str: str) -> str:
+    """Преобразует ISO-дату в локальный часовой пояс формата `YYYY-MM-DD HH:MM:SS`."""
     if not iso_str:
         return ""
     try:

@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block content %}
+{% if msg == 'blocked' %}
+<p role="alert"><strong>{{ t('detail_msg_blocked_title') }}</strong> {{ t('detail_msg_blocked_body') }}</p>
+{% elif msg == 'saved' %}
+<p role="alert"><strong>{{ t('detail_msg_saved_title') }}</strong> {{ t('detail_msg_saved_body') }}</p>
+{% endif %}
+
+<dl>
+    <dt><strong>{{ t('detail_compare_mode') }}</strong></dt>
+    <dd>
+        {% if is_substring %}
+            {{ t('detail_mode_substring') }}
+        {% else %}
+            {{ t('detail_mode_exact') }}
+        {% endif %}
+    </dd>
+
+    <dt><strong>{{ t('detail_last_triggered') }}</strong></dt>
+    <dd>{{ last_triggered_formatted }}</dd>
+
+    <dt><strong>{{ t('detail_trigger_count', days=retention_days) }}</strong></dt>
+    <dd>{{ bundle.trigger_count }}</dd>
+
+    <dt><strong>{{ t('detail_current_status') }}</strong></dt>
+    <dd>
+        {% if bundle.is_blocked %}
+            {{ t('detail_status_blocked') }}
+        {% else %}
+            {{ t('detail_status_active') }}
+        {% endif %}
+    </dd>
+</dl>
+
+<hr>
+<h2>{{ t('detail_edit_heading') }}</h2>
+<p>{{ t('detail_edit_hint_prefix') }} <code>{{ t('detail_edit_hint_example') }}</code>.</p>
+
+<form method="post" action="/bundle/{{ bundle.id }}/update">
+    <div>
+        <label for="host">{{ t('detail_field_host') }}</label><br>
+        <input type="text" id="host" name="host" value="{{ bundle.host }}" required size="50">
+    </div><br>
+    <div>
+        <label for="service">{{ t('detail_field_service') }}</label><br>
+        <select id="service" name="service">
+            <option value="container" {% if bundle.service == 'container' %}selected{% endif %}>container</option>
+            <option value="unit" {% if bundle.service == 'unit' %}selected{% endif %}>unit</option>
+            <option value="unknown" {% if bundle.service not in ('container', 'unit') %}selected{% endif %}>unknown</option>
+        </select>
+    </div><br>
+    <div>
+        <label for="program">{{ t('detail_field_program') }}</label><br>
+        <input type="text" id="program" name="program" value="{{ bundle.program }}" required size="50">
+    </div><br>
+    <div>
+        <label for="message">{{ t('detail_field_message') }}</label><br>
+        <textarea id="message" name="message" rows="3" cols="60" required>{{ bundle.message }}</textarea>
+    </div><br>
+    <div>
+        <label for="description">{{ t('detail_field_desc') }}</label><br>
+        <textarea id="description" name="description" rows="4" cols="60">{{ bundle.description }}</textarea>
+    </div><br>
+    <div>
+        <input type="checkbox" id="is_blocked" name="is_blocked" value="1" {% if bundle.is_blocked %}checked{% endif %}>
+        <label for="is_blocked">{{ t('detail_field_block') }}</label>
+    </div><br>
+    <button type="submit" name="action" value="save_all">{{ t('detail_btn_save') }}</button>
+    <button type="submit" name="action" value="delete">{{ t('detail_btn_delete') }}</button>
+</form>
+{% endblock %}

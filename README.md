@@ -36,7 +36,7 @@
 Дополнительно в контейнер пробрасываются системный файл времени и каталог конфигурации:
 
 * `/etc/localtime:/etc/localtime:ro` — синхронизирует системное время контейнера с хост-машиной в режиме только для чтения.
-* `./vaf:/afilter/data` — подключает постоянное хранилище на хосте для файла настроек `config.json` и файла базы данных `alerts.db`.
+* `./vector-alert-filter:/afilter/data` — подключает постоянное хранилище на хосте для файла настроек `config.json` и файла базы данных `alerts.db`.
 
 ## Переопределение параметров запуска через command в compose.yml
 
@@ -50,14 +50,14 @@
 
 ```yaml
 services:
-  vaf:
-    container_name: vaf
-    image: i3p4/vaf:latest
+  vector-alert-filter:
+    container_name: vector-alert-filter
+    image: i3p4/vector-alert-filter:latest
     environment:
       - TZ=Asia/Krasnoyarsk
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - ./vaf:/afilter/data
+      - ./vector-alert-filter:/afilter/data
     restart: unless-stopped
     ports:
       - 8080:8080
@@ -72,18 +72,18 @@ services:
 1. Первый запуск и сборка образа:
    `docker compose up -d --build`
 2. Пересборка образа после изменения Python-кода в папке `app/`, файла `main.py` или списка зависимостей в `requirements.txt` (если используется локальная сборка из `Dockerfile`):
-   `docker build -t i3p4/vaf:latest . && docker compose up -d`
+   `docker build -t i3p4/vector-alert-filter:latest . && docker compose up -d`
 3. Принудительное пересоздание контейнера после изменения `compose.yml`, секции `command` или переменных окружения:
    `docker compose up -d --force-recreate`
 4. Просмотр логов работы сервиса в реальном времени (выход из просмотра по `Ctrl+C`):
-   `docker compose logs -f vaf`
+   `docker compose logs -f vector-alert-filter`
 5. Просмотр последних 100 строк логов:
-   `docker compose logs --tail=100 vaf`
+   `docker compose logs --tail=100 vector-alert-filter`
 6. Перезапуск сервиса (необходим после изменения `listen_host`, `listen_port`, `log_level` или `db_backend` через веб-интерфейс):
-   `docker compose restart vaf`
-7. Остановка и удаление контейнера (данные в `/home/ipavel/Share/Config/vaf` сохраняются):
+   `docker compose restart vector-alert-filter`
+7. Остановка и удаление контейнера (данные в `./vector-alert-filter` сохраняются):
    `docker compose down`
 8. Открыть отдельную командную строку внутри работающего контейнера (для выхода без остановки сервиса введите `exit`):
-   `docker compose exec -it vaf /bin/bash`
+   `docker compose exec -it vector-alert-filter /bin/bash`
 9. Подключиться напрямую к потоку ввода-вывода главного запущенного процесса (для безопасного отключения без остановки контейнера нажмите `Ctrl+P`, затем `Ctrl+Q`; нажатие `Ctrl+C` остановит контейнер):
-   `docker attach vaf`
+   `docker attach vector-alert-filter`

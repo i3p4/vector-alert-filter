@@ -1,3 +1,10 @@
+"""Модуль формирования и отправки сводных почтовых уведомлений.
+
+Обеспечивает накопление событий в течение настроенной задержки (`batch_delay_seconds`),
+группировку алертов по хостам и службам, рендеринг локализованных HTML- и текстовых
+шаблонов Jinja2 из директории `app/templates/mail` и отправку писем по SMTP.
+"""
+
 import logging
 import queue
 import smtplib
@@ -9,24 +16,39 @@ from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid
-from html import escape
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlencode
+
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from app.config import (
     get_base_url,
     get_batch_delay_seconds,
     get_first_available_api_key,
+    get_language,
     get_smtp_config,
 )
+from app.i18n import translate
 from app.worker import mail_queue
 
 logger = logging.getLogger("alert_filter.mailer")
+
+MAIL_TEMPLATES_DIR = Path(__file__).resolve().parent / "templates" / "mail"
+
+_mail_jinja_env = Environment(
+    loader=FileSystemLoader(str(MAIL_TEMPLATES_DIR)),
+    autoescape=select_autoescape(["html", "xml"]),
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
+_mail_jinja_env.globals["t"] = translate
 
 _mail_thread: Optional[threading.Thread] = None
 
 
 def _build_ssl_context(verify_ssl: bool) -> ssl.SSLContext:
+    """Создает SSL-контекст для SMTP-соединения с учетом проверки сертификата."""
     ctx = ssl.create_default_context()
     if not verify_ssl:
         ctx.check_hostname = False
@@ -36,6 +58,7 @@ def _build_ssl_context(verify_ssl: bool) -> ssl.SSLContext:
 
 
 def _make_block_url(base_url: str, api_key: str, item: dict) -> str:
+    """Формирует URL для быстрой блокировки связки через `/api/block`."""
     query_params = urlencode({
         "key": api_key,
         "host": item["host"],
@@ -46,123 +69,96 @@ def _make_block_url(base_url: str, api_key: str, item: dict) -> str:
     return f"{base_url}/api/block?{query_params}"
 
 
-def _make_link_label(item: dict) -> str:
+def _make_link_label(item: dict, lang: str) -> str:
+    """Формирует локализованную подпись ссылки быстрой блокировки."""
     msg_preview = item["message"].strip()
     if len(msg_preview) > 60:
         msg_preview = msg_preview[:57] + "..."
-    return f"Заблокировать: {item['program']} — {msg_preview}"
+    return translate("mail_block_link", lang=lang, program=item["program"], preview=msg_preview)
 
 
-def _send_host_email(host: str, host_alerts: list, base_url: str, api_key: str):
+def _prepare_item_payload(item: dict, base_url: str, api_key: str, lang: str) -> dict:
+    """Подготавливает словарь данных одного события для передачи в шаблон письма."""
+    return {
+        "message": item["message"],
+        "block_url": _make_block_url(base_url, api_key, item),
+        "link_label": _make_link_label(item, lang),
+    }
+
+
+def _send_host_email(host: str, host_alerts: list, base_url: str, api_key: str) -> None:
+    """Формирует и отправляет сводное письмо для конкретного хоста через шаблоны Jinja2."""
+    lang = get_language()
     unique_programs = list(OrderedDict.fromkeys(item["program"] for item in host_alerts))
     programs_str = ", ".join(unique_programs)
     total_count = len(host_alerts)
-    subject = f"Сбой: {host}: {programs_str}. ({total_count})"
+    subject = translate(
+        "mail_subject",
+        lang=lang,
+        host=host,
+        programs=programs_str,
+        count=total_count,
+    )
 
-    grouped = OrderedDict()
+    grouped: OrderedDict[tuple[str, str], list[dict]] = OrderedDict()
     for item in host_alerts:
         group_key = (item["service"], item["program"])
-        if group_key not in grouped:
-            grouped[group_key] = []
-        grouped[group_key].append(item)
+        grouped.setdefault(group_key, []).append(item)
 
-    html_groups = []
-    text_groups = []
-
+    template_groups = []
     for (service, program), items in grouped.items():
-        first_item = items[0]
-        first_link = _make_block_url(base_url, api_key, first_item)
-        first_label = _make_link_label(first_item)
-
-        group_html_parts = [
-            "<article>",
-            f"<h2>[{escape(service)}] {escape(program)}</h2>",
-            f"<p><strong>Сообщение:</strong><br>{escape(first_item['message'])}<br>"
-            f'<a href="{escape(first_link)}">{escape(first_label)}</a></p>',
+        first_item = _prepare_item_payload(items[0], base_url, api_key, lang)
+        extra_items = [
+            _prepare_item_payload(extra, base_url, api_key, lang) for extra in items[1:]
         ]
+        template_groups.append({
+            "service": service,
+            "program": program,
+            "first_item": first_item,
+            "extra_items": extra_items,
+        })
 
-        group_text_parts = [
-            f"host: {host} | {service}: {program}",
-            f"  - Сообщение: {first_item['message']}",
-            f"    {first_label}: {first_link}",
-        ]
+    context = {
+        "lang": lang,
+        "subject": subject,
+        "host": host,
+        "groups": template_groups,
+        "current_year": datetime.now().year,
+    }
 
-        if len(items) > 1:
-            remaining_items = items[1:]
-            spoiler_entries = []
-            for extra in remaining_items:
-                extra_link = _make_block_url(base_url, api_key, extra)
-                extra_label = _make_link_label(extra)
-                spoiler_entries.append(
-                    f"<p>{escape(extra['message'])}<br>"
-                    f'<a href="{escape(extra_link)}">{escape(extra_label)}</a></p>'
-                )
-                group_text_parts.append(
-                    f"  - Сообщение: {extra['message']}\n"
-                    f"    {extra_label}: {extra_link}"
-                )
+    html_template = _mail_jinja_env.get_template("alert_email.html")
+    text_template = _mail_jinja_env.get_template("alert_email.txt")
 
-            group_html_parts.append(
-                f"<details>"
-                f"<summary>Еще ({len(remaining_items)}) сообщений для {escape(program)}</summary>"
-                f"{''.join(spoiler_entries)}"
-                f"</details>"
-            )
-
-        group_html_parts.append("</article><hr>")
-        group_text_parts.append("---")
-
-        html_groups.append("\n".join(group_html_parts))
-        text_groups.append("\n".join(group_text_parts))
-
-    current_year = datetime.now().year
-    full_html = f"""<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="utf-8">
-    <title>{escape(subject)}</title>
-</head>
-<body>
-    <main>
-        <h1>{escape(subject)}</h1>
-        {''.join(html_groups)}
-    </main>
-    <footer>
-        <p>&copy; VAF {current_year}</p>
-    </footer>
-</body>
-</html>"""
-
-    text_groups.append(f"© VAF {current_year}")
+    full_html = html_template.render(**context)
+    full_text = text_template.render(**context)
 
     logger.debug(
         "Сформировано письмо для хоста %s (групп: %d, всего событий: %d).",
         host,
-        len(grouped),
+        len(template_groups),
         total_count,
     )
-    send_smtp(subject, full_html, "\n".join(text_groups))
+    send_smtp(subject, full_html, full_text)
 
 
-def build_and_send_alerts_email(alerts_to_send: list):
+def build_and_send_alerts_email(alerts_to_send: list) -> None:
+    """Группирует накопленные алерты по хостам и инициирует отправку писем."""
     if not alerts_to_send:
         return
 
     api_key = get_first_available_api_key()
     base_url = get_base_url()
 
-    by_host = OrderedDict()
+    by_host: OrderedDict[str, list] = OrderedDict()
     for item in alerts_to_send:
-        host = item["host"]
-        if host not in by_host:
-            by_host[host] = []
-        by_host[host].append(item)
+        by_host.setdefault(item["host"], []).append(item)
 
     for host, host_alerts in by_host.items():
         _send_host_email(host, host_alerts, base_url, api_key)
 
 
-def send_smtp(subject: str, html_body: str, text_body: str):
+def send_smtp(subject: str, html_body: str, text_body: str) -> None:
+    """Выполняет отправку multipart/alternative письма через настроенный SMTP-сервер."""
     smtp_cfg = get_smtp_config()
     host = smtp_cfg.get("host", "localhost")
     port = int(smtp_cfg.get("port", 465))
@@ -205,7 +201,8 @@ def send_smtp(subject: str, html_body: str, text_body: str):
         logger.error("Ошибка при отправке письма через SMTP (%s:%d): %s", host, port, e, exc_info=True)
 
 
-def _mailer_worker_loop():
+def _mailer_worker_loop() -> None:
+    """Основной цикл фонового потока почтовика с накоплением батчей по таймеру."""
     logger.debug("Поток почтовика запущен.")
     while True:
         try:
@@ -249,13 +246,15 @@ def _mailer_worker_loop():
             break
 
 
-def start_mailer_worker():
+def start_mailer_worker() -> None:
+    """Запускает фоновый поток отправки почтовых уведомлений."""
     global _mail_thread
     _mail_thread = threading.Thread(target=_mailer_worker_loop, name="MailerWorker", daemon=False)
     _mail_thread.start()
 
 
-def stop_mailer_worker():
+def stop_mailer_worker() -> None:
+    """Корректно закрывает очередь почтовика и ожидает завершения отправки писем."""
     logger.info("Закрытие очереди почтовика и ожидание отправки накопленных писем...")
     mail_queue.shutdown(immediate=False)
     if _mail_thread and _mail_thread.is_alive():
